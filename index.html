@@ -36,6 +36,17 @@ select { background: #221d33; color: #cfd2dc; border: 1px solid #3a3354;
 details { margin-top: 10px; }
 summary { cursor: pointer; color: #8f93a3; }
 .row { margin: 8px 0; display: flex; gap: 8px; align-items: center; }
+#keys { position: relative; height: 84px; margin: 10px 0 2px; display: flex;
+  touch-action: none; user-select: none; }
+.wkey { flex: 1; border: 1px solid #3a3354; background: #b9bcc8;
+  box-sizing: border-box; border-radius: 0 0 3px 3px; cursor: pointer; }
+.bkey { position: absolute; top: 0; width: 6.5%; height: 58%;
+  background: #221d33; border: 1px solid #3a3354; border-radius: 0 0 3px 3px;
+  box-sizing: border-box; cursor: pointer; z-index: 1; }
+.wkey.on { background: #e0a44c; }
+.bkey.on { background: #8a5a24; }
+#keyhint { font-size: 11px; color: #6c7080; }
+#voices { color: #e0a44c; font-size: 12px; min-height: 16px; }
 a { color: #8f93a3; }
 </style>
 </head>
@@ -55,6 +66,11 @@ a { color: #8f93a3; }
   </div>
   <div class="row"><button id="panic">Reset engine</button>
     <a href="selftest.html" style="margin-left:auto">selftest</a></div>
+  <div id="keys"></div>
+  <div id="keyhint">Play: A W S E D F T G Y H U J K O L P ; ' — Z/X octave
+    (<span id="oct"></span>). Notes feed the same engine as the loops:
+    dense chords eat the bit budget.</div>
+  <div id="voices"></div>
   <div id="params-named"></div>
   <details>
     <summary>Advanced</summary>

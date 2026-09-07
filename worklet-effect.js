@@ -56,11 +56,14 @@
         if (!self.tapsOn) return;
         if (++self.tapCount % self.tapEvery) return;
         var eng = self.eng;
+        // slice everything to the frame's own band count: on a short frame
+        // bandsE past info.B holds NaN and the edge maps are the short grid's
+        var B = info.B;
         self.port.postMessage({
           type: 'taps',
-          bandsE: new Float32Array(eng.bandsE),
-          edge: new Int32Array(eng.bands.edge),
-          destEdge: new Int32Array(eng.destEdge),
+          bandsE: new Float32Array(eng.bandsE.subarray(0, B)),
+          edge: new Int32Array(info.edge.subarray(0, B + 1)),
+          destEdge: new Int32Array(eng.destEdge.subarray(0, B + 1)),
           W: info.block,
           fs: FS_GUESS,
           short: info.short,

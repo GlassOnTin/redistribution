@@ -75,6 +75,35 @@ function offlineRender(loop, fs, seconds, over) {
   return outL.subarray(0, got);
 }
 
+// the synth worklet shim: blob order is synth.js + worklet-synth.js
+function makeSynthWorklet() {
+  var registered = {};
+  var posted = [];
+  var sandbox = {
+    console: console, Math: Math, Float32Array: Float32Array, Int32Array: Int32Array,
+    Float64Array: Float64Array, isFinite: isFinite,
+  };
+  sandbox.self = sandbox;
+  sandbox.globalThis = sandbox;
+  sandbox.sampleRate = 48000;
+  sandbox.AudioWorkletProcessor = function () {
+    this.port = {
+      onmessage: null,
+      postMessage: function (m) { posted.push(m); },
+    };
+  };
+  sandbox.registerProcessor = function (name, cls) { registered[name] = cls; };
+  vm.createContext(sandbox);
+  for (var f of ['synth.js', 'worklet-synth.js'])
+    vm.runInContext(fs.readFileSync(path.join(REPO, f), 'utf8'), sandbox,
+      { filename: f });
+  var Cls = registered['redistribution-synth'];
+  if (!Cls) throw new Error('synth processor not registered');
+  var node = new Cls();
+  node.__posted = posted;
+  return node;
+}
+
 (function main() {
   var fs = 48000;
   var over = { budget: 0.6, gravity: 0.5 };
@@ -174,6 +203,50 @@ function offlineRender(loop, fs, seconds, over) {
     node.process([[inL, inR]], [[oL, oR]]);
     node.process([[inL, inR]], [[oL, oR]]);
     t.ok(node.__posted.length === before, 'no taps while gated off');
+  });
+
+  t.test('synth worklet: notes sound, voice count is relayed, notes retire', function () {
+    var node = makeSynthWorklet();
+    var n = 128;
+    var oL = new Float32Array(n), oR = new Float32Array(n);
+    var peak = 0;
+    node.port.onmessage({ data: { type: 'note', note: 69, on: true } });
+    for (var q = 0; q < 20; q++) {            // ~53 ms: past the 3 ms attack
+      node.process([[], []], [[oL, oR]]);
+      for (var i = 0; i < n; i++) {
+        if (Math.abs(oL[i]) > peak) peak = Math.abs(oL[i]);
+        if (!isFinite(oL[i])) t.ok(false, 'non-finite synth output');
+      }
+    }
+    t.ok(peak > 0.01, 'note is audible (peak ' + peak.toFixed(3) + ')');
+    t.ok(oL[0] === oR[0], 'mono bank carried on both channels');
+    var voices = node.__posted.filter(function (m) { return m.type === 'voices'; });
+    t.ok(voices.length > 0 && voices[voices.length - 1].count === 1,
+      'voice count relayed (last ' +
+      (voices.length ? voices[voices.length - 1].count : 'none') + ')');
+    // 17 notes: count must cap at 16
+    for (var nn = 0; nn < 17; nn++)
+      node.port.onmessage({ data: { type: 'note', note: 40 + nn, on: true } });
+    node.process([[], []], [[oL, oR]]);
+    t.ok(node.synth.activeCount() <= 16, 'voice cap held (' +
+      node.synth.activeCount() + ')');
+    // release: all notes off, render past the 60 ms tail, count returns to 0
+    node.port.onmessage({ data: { type: 'alloff' } });
+    for (q = 0; q < 60; q++) node.process([[], []], [[oL, oR]]);
+    var tailPeak = 0;
+    for (i = 0; i < n; i++) tailPeak = Math.max(tailPeak, Math.abs(oL[i]));
+    t.ok(tailPeak < 1e-3, 'tail is silent (peak ' + tailPeak.toExponential(2) + ')');
+    voices = node.__posted.filter(function (m) { return m.type === 'voices'; });
+    t.ok(voices[voices.length - 1].count === 0, 'count returned to 0');
+    // waveform switch rebuilds the bank
+    node.port.onmessage({ data: { type: 'waveform', waveform: 'harmonic' } });
+    node.port.onmessage({ data: { type: 'note', note: 69, on: true } });
+    node.process([[], []], [[oL, oR]]);
+    peak = 0;
+    for (q = 0; q < 10; q++) node.process([[], []], [[oL, oR]]);
+    for (i = 0; i < n; i++) peak = Math.max(peak, Math.abs(oL[i]));
+    t.ok(peak > 0.01, 'harmonic bank sounds after switch (peak ' + peak.toFixed(3) + ')');
+    t.ok(node.waveform === 'harmonic', 'waveform recorded');
   });
 
   console.log(t.pass + '/' + (t.pass + t.fail) + ' tests pass, ' + t.checks + ' checks');

@@ -473,8 +473,12 @@
         engine.onBins(mL, mR, K, short, start);
       }
       if (engine.onFrame) {
-        for (j = 0; j < BL; j++) bandsE[j] = Eb[j];
-        engine.onFrame({ short: short, start: start, block: w, stats: stats });
+        // only the frame's own band count is valid: bandsE is sized for the
+        // long grid, and a short frame's Eb (and edge map) are shorter —
+        // consumers slice by B, never walk bandsE to its allocated length
+        for (j = 0; j < B; j++) bandsE[j] = Eb[j];
+        engine.onFrame({ short: short, start: start, block: w, stats: stats,
+          B: B, edge: bands.edge });
       }
 
       // inverse transform per channel: mirror bins, IFFT, window, OLA
