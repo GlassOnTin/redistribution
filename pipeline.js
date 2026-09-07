@@ -215,8 +215,9 @@
 
     var zRe = [new Float64Array(W_L), new Float64Array(W_L)];
     var zIm = [new Float64Array(W_L), new Float64Array(W_L)];
-    var yRe = new Float64Array(W_L), yIm = new Float64Array(W_L);
-    var yEn = new Float64Array(W_L);
+    var yRe = [new Float64Array(W_L), new Float64Array(W_L)];
+    var yIm = [new Float64Array(W_L), new Float64Array(W_L)];
+    var yEn = [new Float64Array(W_L), new Float64Array(W_L)];
     var destEdge = new Int32Array(BL + 1);
 
     var state = 'long';                 // long | shorts | start | stop
@@ -423,6 +424,10 @@
         applyIntensity(bands, B);
         applyLock(bands, B, K, hop, w, short);
         applyTilt(K, hop);
+      } else {
+        // the warp overlay reads destEdge even in a neutral preset: leave it
+        // as the identity map, not the zero-filled initial array
+        for (j = 0; j <= B; j++) destEdge[j] = bands.edge[j];
       }
       updateDetector(Eb, bands, B, short);
 
@@ -468,19 +473,22 @@
         thr[j] = ath((fLo + fHi) / 2);
       }
       // spreading: a masker raises neighbours' thresholds. Upper slope
-      // 10 dB/band, lower slope 20 dB/band, window +-4 bands.
+      // 10 dB/band, lower slope 20 dB/band, window +-4 bands. A band does
+      // not mask itself: its own level must survive as demand, or a lone
+      // tone's band computes demand (L - (L - 5.9))/6.02 < 1 and starves.
       var spread = new Float64Array(B);
       for (j = 0; j < B; j++) {
         var m = thr[j];
         for (i = Math.max(0, j - 4); i <= Math.min(B - 1, j + 4); i++) {
+          if (i === j) continue;
           var d = j - i;
-          var contrib = L[i] - (d >= 0 ? 10 * d : -20 * d);
+          var contrib = L[i] - (d >= 0 ? 10 * d : -20 * d) - 5.9;
           if (contrib > m) m = contrib;
         }
         spread[j] = m;
       }
       for (j = 0; j < B; j++) {
-        thr[j] = Math.max(spread[j] - 5.9, thr[j]);
+        thr[j] = Math.max(spread[j], thr[j]);
         demand[j] = Math.min(15, Math.max(0, (L[j] - thr[j]) / 6.02));
       }
 
@@ -496,7 +504,7 @@
               if (pairs[q][0] === j) { dL += demand[s] * pairs[q][1]; break; }
             }
           }
-          var alpha = 1 - Math.exp(-hop / (huntTau() * fs));
+          var alpha = huntAlpha();
           sm[j] += alpha * (dL - sm[j]);
         }
         assignBitsLong();
@@ -512,7 +520,7 @@
         for (j = 0; j < BS; j++) starvedShort[j] = bitsS[j] === 0 ? 1 : 0;
       } else {
         for (j = 0; j < BL; j++) {
-          var alpha2 = 1 - Math.exp(-hop / (huntTau() * fs));
+          var alpha2 = huntAlpha();
           sm[j] += alpha2 * (demand[j] - sm[j]);
         }
         assignBitsLong();
@@ -520,10 +528,13 @@
       }
     }
 
-    function huntTau() {
-      // hunt 0 -> 1 frame, hunt 1 -> 64 frames (~21 ms .. ~1.4 s at long hop)
+    function huntAlpha() {
+      // hunt 0 -> 1-frame time constant (alpha 0.63), hunt 1 -> 64 frames
+      // (~21 ms .. ~1.4 s at long hop). Per-frame smoothing: one frame is the
+      // unit, so alpha = 1 - exp(-1/tau_frames) regardless of hop size.
       var f = Math.min(1, Math.max(0, cur.hunt));
-      return 1 + 63 * f * f;
+      var tau = 1 + 63 * f * f;
+      return 1 - Math.exp(-1 / tau);
     }
 
     function assignBitsLong() {
@@ -540,10 +551,16 @@
         bits[j] = Math.min(MAX_BITS_PER_BAND, Math.floor(t[j]));
         assigned += bits[j];
       }
-      // distribute leftovers by fractional remainder; hunt dithers the order
+      // distribute leftovers by fractional remainder; hunt dithers the order.
+      // The pool is capped at the fractional parts: budget above total demand
+      // leaves bits unspent — force-feeding surplus into the first bands made
+      // the allocator insensitive to Budget above the demand ceiling.
       var order = [];
       for (j = 0; j < BL; j++) order.push(j);
+      var fracSum = 0;
+      for (j = 0; j < BL; j++) fracSum += t[j] - Math.floor(t[j]);
       var rem = total - assigned;
+      if (rem > Math.floor(fracSum + 1e-9)) rem = Math.floor(fracSum + 1e-9);
       while (rem > 0) {
         var best = -1, bestV = -1;
         for (var q = 0; q < order.length; q++) {
@@ -695,9 +712,10 @@
         }
       }
 
-      // fold every surviving band's bins down its dest range (hidden bands
-      // contribute only through the stash)
-      yRe.fill(0); yIm.fill(0); yEn.fill(0);
+      // fold every surviving band's bins down its dest range, per channel
+      // (hidden bands contribute only through the stash)
+      yRe[0].fill(0); yIm[0].fill(0); yEn[0].fill(0);
+      yRe[1].fill(0); yIm[1].fill(0); yEn[1].fill(0);
       for (j = 0; j < B; j++) {
         if (hiding && starved[j]) continue;
         var lo2 = bands.edge[j], hi2 = bands.edge[j + 1];
@@ -707,8 +725,8 @@
           if (d2 < dlo) d2 = dlo; if (d2 >= dhi) d2 = dhi - 1;
           if (d2 < 1 || d2 > K - 1) continue;
           for (var c2 = 0; c2 < 2; c2++) {
-            yRe[d2] += zRe[c2][b3]; yIm[d2] += zIm[c2][b3];
-            yEn[d2] += zRe[c2][b3] * zRe[c2][b3] + zIm[c2][b3] * zIm[c2][b3];
+            yRe[c2][d2] += zRe[c2][b3]; yIm[c2][d2] += zIm[c2][b3];
+            yEn[c2][d2] += zRe[c2][b3] * zRe[c2][b3] + zIm[c2][b3] * zIm[c2][b3];
           }
         }
       }
@@ -717,23 +735,24 @@
         var s2 = hideStash[j];
         for (var i2 = 0; i2 < s2.length; i2 += 4) {
           var d1 = s2[i2];
-          var dm1 = Math.sqrt(yRe[d1] * yRe[d1] + yIm[d1] * yIm[d1]);
+          var dm1 = Math.sqrt(yRe[j][d1] * yRe[j][d1] + yIm[j][d1] * yIm[j][d1]);
           var g1 = s2[i2 + 3] / (s2[i2 + 3] + dm1 + 1e-30);
-          yRe[d1] += s2[i2 + 1] * g1; yIm[d1] += s2[i2 + 2] * g1;
+          yRe[j][d1] += s2[i2 + 1] * g1; yIm[j][d1] += s2[i2 + 2] * g1;
         }
       }
-      if (cur.exactEnergy) {
-        for (var d3 = 1; d3 < K; d3++) {
-          var m2 = yRe[d3] * yRe[d3] + yIm[d3] * yIm[d3];
-          if (m2 > 1e-30 && yEn[d3] > 1e-30) {
-            var sc = Math.sqrt(yEn[d3] / m2);
-            yRe[d3] *= sc; yIm[d3] *= sc;
+      for (var c3 = 0; c3 < 2; c3++) {
+        if (cur.exactEnergy) {
+          for (var d3 = 1; d3 < K; d3++) {
+            var m2 = yRe[c3][d3] * yRe[c3][d3] + yIm[c3][d3] * yIm[c3][d3];
+            if (m2 > 1e-30 && yEn[c3][d3] > 1e-30) {
+              var sc = Math.sqrt(yEn[c3][d3] / m2);
+              yRe[c3][d3] *= sc; yIm[c3][d3] *= sc;
+            }
           }
         }
-      }
-      for (var d4 = 1; d4 < K; d4++) {
-        zRe[0][d4] = yRe[d4]; zIm[0][d4] = yIm[d4];
-        zRe[1][d4] = yRe[d4]; zIm[1][d4] = yIm[d4];
+        for (var d4 = 1; d4 < K; d4++) {
+          zRe[c3][d4] = yRe[c3][d4]; zIm[c3][d4] = yIm[c3][d4];
+        }
       }
     }
 
@@ -798,6 +817,10 @@
 
     // ---------- Lock: per-band scalar phase loop ----------
     function applyLock(bands, B, K, hop, w, short) {
+      // lock 0 = loop off. The tau curve below has its SLOWEST setting at 0,
+      // so without this gate the loop would still integrate at ~0.5 s and
+      // crawl each band's correction toward its fractional-bin drift.
+      if (Math.abs(cur.lock) < 1e-4) return;
       var tau = 0.02 + 0.5 * (1 - Math.min(1, Math.max(0, cur.lock)));
       var alpha = 1 - Math.exp(-hop / (tau * fs));
       var pvSet = prevA[short ? 'short' : 'long'];
@@ -823,7 +846,12 @@
             corr[j] += alpha * bandErr;
             if (corr[j] > Math.PI) corr[j] = Math.PI;
             if (corr[j] < -Math.PI) corr[j] = -Math.PI;
-            var cr = Math.cos(-corr[j]), ci = Math.sin(-corr[j]);
+            // Rotate by +corr: pv holds this frame's corrected angle, so the
+            // next frame's error reads (drift - corr) — negative feedback, corr
+            // settles at the band's fractional-bin drift. The -corr form was
+            // positive feedback ((1+alpha)·corr) and ran every band to the ±pi
+            // rail, leaving it inverted.
+            var cr = Math.cos(corr[j]), ci = Math.sin(corr[j]);
             for (b = bands.edge[j]; b < bands.edge[j + 1]; b++) {
               var rr = zr[b] * cr - zi[b] * ci;
               var ri = zr[b] * ci + zi[b] * cr;

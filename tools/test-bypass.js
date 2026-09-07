@@ -27,11 +27,12 @@ function run(x, params, fs, onEvent) {
   var y = new Float32Array(x.length);
   var emitted = 0, pos = 0;
   var a = new Float32Array(CHUNK), oa = new Float32Array(CHUNK);
-  var zb = new Float32Array(CHUNK);
-  while (pos < x.length + 4096) { // flush the tail through the backlog
+  var rin = new Float32Array(CHUNK);  // right-channel input: NOT the output
+  var rout = new Float32Array(CHUNK); // buffer — aliasing the two would feed
+  while (pos < x.length + 4096) {     // the engine's own output back in
     var n = Math.min(CHUNK, x.length + 4096 - pos);
     for (var i = 0; i < n; i++) a[i] = pos + i < x.length ? x[pos + i] : 0;
-    var give = eng.process(a, zb, oa, zb, n);
+    var give = eng.process(a, rin, oa, rout, n);
     for (i = 0; i < give; i++) if (emitted + i < x.length) y[emitted + i] = oa[i];
     emitted += give;
     pos += n;
@@ -103,13 +104,13 @@ t.test('bypass: frame mode switched mid-stream stays an identity', function () {
   var y = new Float32Array(N);
   var emitted = 0, pos = 0;
   var a = new Float32Array(CHUNK), oa = new Float32Array(CHUNK);
-  var zb = new Float32Array(CHUNK);
+  var rin = new Float32Array(CHUNK), rout = new Float32Array(CHUNK);
   while (pos < N + 4096) {
     var n = Math.min(CHUNK, N + 4096 - pos);
     // flip the mode every 4000 samples: long -> short -> adaptive -> long
     d.frame = ['long', 'short', 'adaptive', 'long'][Math.floor(pos / 4000) % 4];
     for (var j = 0; j < n; j++) a[j] = pos + j < N ? x[pos + j] : 0;
-    var give = eng.process(a, zb, oa, zb, n);
+    var give = eng.process(a, rin, oa, rout, n);
     for (j = 0; j < give; j++) if (emitted + j < N) y[emitted + j] = oa[j];
     emitted += give;
     pos += n;
@@ -138,11 +139,24 @@ t.test('bypass at 44100 Hz', function () {
 });
 
 t.test('full modify path at full budget is nearly an identity', function () {
-  // level far below the default forces the modify path to run while nothing
-  // starves badly: quantize is lossy by design, so the gate is "small error",
-  // not exact
-  var r = run(x, { frame: 'long', level: -60, budget: 1.0001 });
-  var w = worstDiff(x, r.y, INTERIOR[0], INTERIOR[1]);
+  // budget must stay BELOW the 0.999 bypass threshold or isBypass takes the
+  // fast path and this test proves nothing. Tone-only signal: a noise bed
+  // would have its high bands starved (the masking model's designed loss, as
+  // heavy as 1-bit quantize) and dominate the error for reasons this test is
+  // not about. The engine eases params from defaults over ~13 frames, so
+  // prime with silence and measure steady state. Gate is "small error".
+  var PRIME = 20480;
+  var xt = new Float32Array(N);
+  for (var i = 0; i < N; i++) {
+    xt[i] = 0.3 * Math.sin(2 * Math.PI * 220 * i / FS) +
+            0.3 * Math.sin(2 * Math.PI * 3170 * i / FS + 1.1);
+  }
+  var xp = new Float32Array(PRIME + N);
+  for (i = 0; i < N; i++) xp[PRIME + i] = xt[i];
+  var r = run(xp, { frame: 'long', level: 40, budget: 0.998 });
+  // skip the post-onset allocator convergence: sm eases up from its silent
+  // value for ~10 frames, quantizing coarsely while it does
+  var w = worstDiff(xp, r.y, PRIME + 10240, PRIME + N - 4096);
   t.ok(w.w < 0.02, 'high-budget modify path near-identity (worst ' + w.w.toExponential(2) + ' at ' + w.at + ')');
 });
 
