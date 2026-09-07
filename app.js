@@ -170,6 +170,7 @@ function buildParamUI() {
       row._val = val;
     }
     input.dataset.param = meta.key;
+    input.id = 'p-' + meta.key;
     input.addEventListener('input', () => {
       if (row._val && input.type === 'range') {
         row._val.textContent = (meta.log ? (+input.value).toFixed(2) : input.value) +
@@ -185,57 +186,107 @@ function buildParamUI() {
 // ---------- taps -> waterfall ----------
 const canvas = $('spec');
 const g2d = canvas.getContext('2d');
+const ROWS = canvas.height;
 
-function bandY(bin, fs, h, w) {
-  // log-frequency row for a bin edge, low frequency at the bottom. Bins are
-  // DFT bins of the frame's transform (size 2W), which differs per grid.
-  const f = bin * fs / (2 * w);
-  const fmin = 30, fmax = fs / 2;
-  const t = (Math.log(Math.max(f, fmin)) - Math.log(fmin)) / (Math.log(fmax) - Math.log(fmin));
-  return h - t * h;                          // canvas y (0 = top)
+// palette LUT, same 5 stops as the offline PNG renderer (render.js)
+const PALETTE = (() => {
+  const stops = [
+    [8, 6, 20], [64, 20, 96], [232, 90, 26], [252, 212, 60], [255, 252, 224]
+  ];
+  const lut = new Uint8Array(256 * 3);
+  for (let i = 0; i < 256; i++) {
+    const t = i / 255 * (stops.length - 1);
+    const s0 = Math.min(Math.floor(t), stops.length - 2), f = t - s0;
+    const a = stops[s0], b = stops[s0 + 1];
+    lut[i * 3] = a[0] + (b[0] - a[0]) * f;
+    lut[i * 3 + 1] = a[1] + (b[1] - a[1]) * f;
+    lut[i * 3 + 2] = a[2] + (b[2] - a[2]) * f;
+  }
+  return lut;
+})();
+// row frequency edges (log axis, fmin .. Nyquist; row 0 = top = Nyquist) —
+// same axis as the offline PNG renderer
+const FMIN = 30;
+const rowEdge = (fs) => {
+  const e = new Float64Array(ROWS + 1);
+  const r0 = Math.log(FMIN), r1 = Math.log(fs / 2);
+  for (let r = 0; r <= ROWS; r++)
+    e[r] = Math.exp(r1 + (r0 - r1) * r / ROWS);
+  return e;
+};
+let rowEdges = null, rowFs = 0;
+
+// bin -> canvas y for the overlay (log axis, as above)
+function binY(bin, fs, w) {
+  const f = bin * fs / w;
+  const t = (Math.log(Math.max(f, FMIN)) - Math.log(FMIN)) /
+    (Math.log(fs / 2) - Math.log(FMIN));
+  return (1 - Math.max(0, Math.min(1, t))) * ROWS;
 }
 
-const palette = [
-  [8, 6, 20], [64, 20, 96], [232, 90, 26], [252, 212, 60], [255, 252, 224]
-];
-function specColour(v) {
-  const t = Math.max(0, Math.min(1, v)) * (palette.length - 1);
-  const s0 = Math.min(Math.floor(t), palette.length - 2), f = t - s0;
-  const a = palette[s0], b = palette[s0 + 1];
-  return [a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f, a[2] + (b[2] - a[2]) * f].map(Math.round);
-}
-
-let refDb = -100;    // slow adaptive reference, updated per tap
+let refDb = -80;
+let refDbSeeded = false;
 
 function onTaps(e) {
   const m = e.data;
   if (m.type !== 'taps') return;
-  const h = canvas.height, w = canvas.width;
-  // scroll left by 1 column, draw the new one at the right edge
+  const w = canvas.width;
   g2d.drawImage(canvas, -1, 0);
   g2d.fillStyle = '#080614';
-  g2d.fillRect(w - 1, 0, 1, h);
+  g2d.fillRect(w - 1, 0, 1, ROWS);
 
-  // bandsE is linear band power (the allocation path logs it itself); convert
-  // here. Slow peak tracker sets the display reference.
-  let peak = -Infinity;
-  const db = new Float64Array(m.bandsE.length);
-  for (let b = 0; b < m.bandsE.length; b++) {
-    db[b] = 10 * Math.log10(m.bandsE[b] + 1e-12);
-    if (db[b] > peak) peak = db[b];
-  }
-  refDb += 0.05 * (peak - refDb);
+  if (m.bins && m.bins.length > 2) {
+    if (rowFs !== m.fs) { rowEdges = rowEdge(m.fs); rowFs = m.fs; }
+    // the bins are the engine's own post-warp spectrum (left channel) on the
+    // frame's grid: transform size 2K, bin k at k*fs/2K. Paint per pixel row
+    // by max-pooling the bins inside the row's frequency span — the same
+    // construction as the offline PNG, so live and offline read the same.
+    const K = m.bins.length;
+    const df = m.fs / (2 * (K - 1));
+    const FLOOR = 72;                    // display range in dB, as offline
+    let peak = -Infinity;
+    const col = g2d.createImageData(1, ROWS);
+    for (let r = 0; r < ROWS; r++) {
+      const fHi = rowEdges[r], fLo = rowEdges[r + 1];
+      let k0 = Math.max(1, Math.ceil(fLo / df));
+      let k1 = Math.min(K - 1, Math.floor(fHi / df));
+      if (k1 < k0) k1 = k0;              // row narrower than a bin
+      let mx = 0;
+      for (let k = k0; k <= k1; k++) {
+        const p = m.bins[k] * m.bins[k];
+        if (p > mx) mx = p;
+      }
+      const db = 10 * Math.log10(mx + 1e-12);
+      if (db > peak) peak = db;
+      const v = Math.max(0, Math.min(1, (db - (refDb - FLOOR)) / FLOOR));
+      const ci = (v * 255) | 0, o = r * 4;
+      col.data[o] = PALETTE[ci * 3];
+      col.data[o + 1] = PALETTE[ci * 3 + 1];
+      col.data[o + 2] = PALETTE[ci * 3 + 2];
+      col.data[o + 3] = 255;
+    }
+    // reference: fast attack, slow release — a kick must not wash the
+    // history, and a quiet passage must not blackhole it. The first tap
+    // seeds directly: ramping up from -80 paints a saturated startup bar.
+    if (!refDbSeeded) { refDb = peak; refDbSeeded = true; }
+    else refDb += (peak > refDb ? 0.5 : 0.02) * (peak - refDb);
+    g2d.putImageData(col, w - 1, 0);
 
-  const B = m.edge.length - 1;
-  const floor = 60;
-  for (let b = 0; b < B; b++) {
-    const v = Math.max(0, Math.min(1, (db[b] - (refDb - floor)) / floor));
-    const [r, g, bl] = specColour(v);
-    const yTop = bandY(m.destEdge[b], m.fs, h, m.W);
-    const yBot = bandY(m.destEdge[b + 1], m.fs, h, m.W);
-    g2d.fillStyle = `rgb(${r},${g},${bl})`;
-    g2d.fillRect(w - 1, Math.min(yTop, yBot), 1, Math.max(1, Math.abs(yBot - yTop)));
+    // warp overlay: a blue tick at each folded band's original top edge —
+    // the energy paints at its destination (the bins are already warped),
+    // so the vertical gap between tick and energy is the fold distance.
+    // One dim pixel per band: at one column per tap the ticks stack into
+    // persistent lines anyway, and a brighter mark buries the energy.
+    const B = m.edge.length - 1;
+    g2d.fillStyle = 'rgba(110,170,255,0.3)';
+    for (let b = 0; b < B; b++) {
+      if (m.destEdge[b + 1] < m.edge[b + 1]) {
+        const y = binY(m.edge[b + 1], m.fs, 2 * (K - 1));
+        g2d.fillRect(w - 1, y, 1, 1);
+      }
+    }
   }
+
   $('latency').textContent = m.latencyMs.toFixed(0) + ' ms' +
     (m.short ? ' (short)' : '') + ' · ' + m.stats.frames + ' frames, ' +
     m.stats.switches + ' switches';
@@ -345,6 +396,18 @@ function buildKeys() {
     box.appendChild(el);
   }
 }
+
+$('savepng').addEventListener('click', () => {
+  canvas.toBlob((blob) => {
+    if (!blob) return status('PNG export failed', true);
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'redistribution-' + new Date().toISOString()
+      .replace(/[:.]/g, '-') + '.png';
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+  }, 'image/png');
+});
 
 // ---------- wire up ----------
 buildKeys();

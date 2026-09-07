@@ -52,6 +52,13 @@
       this.inRecL = [];
       this.inRecR = [];
       var self = this;
+      // post-warp per-bin magnitudes (left), stashed for the taps message —
+      // both taps fire on the same frame, onBins just before onFrame
+      this.bins = null;
+      this.eng.onBins = function (mL) {
+        if (!self.tapsOn) return;
+        self.bins = new Float32Array(mL);
+      };
       this.eng.onFrame = function (info) {
         if (!self.tapsOn) return;
         if (++self.tapCount % self.tapEvery) return;
@@ -64,6 +71,7 @@
           bandsE: new Float32Array(eng.bandsE.subarray(0, B)),
           edge: new Int32Array(info.edge.subarray(0, B + 1)),
           destEdge: new Int32Array(eng.destEdge.subarray(0, B + 1)),
+          bins: self.bins,
           W: info.block,
           fs: FS_GUESS,
           short: info.short,
@@ -71,6 +79,7 @@
             shorts: info.stats.shorts, switches: info.stats.switches },
           latencyMs: (info.block - (info.short ? 256 : 1024)) / FS_GUESS * 1000
         });
+        self.bins = null;
       };
       this.port.onmessage = function (e) {
         var m = e.data;

@@ -65,6 +65,7 @@ a { color: #8f93a3; }
     <button id="play" disabled>Play</button>
   </div>
   <div class="row"><button id="panic">Reset engine</button>
+    <button id="savepng">Save PNG</button>
     <a href="selftest.html" style="margin-left:auto">selftest</a></div>
   <div id="keys"></div>
   <div id="keyhint">Play: A W S E D F T G Y H U J K O L P ; ' — Z/X octave
@@ -82,9 +83,9 @@ a { color: #8f93a3; }
 <div id="right">
   <canvas id="spec" width="900" height="512"></canvas>
   <div style="font-size:11px;color:#6c7080">
-    Band energies from inside the codec, log frequency (low at the bottom).
-    The warp is the codec's own destination-edge map — bands that ran out of
-    budget fold downward.
+    The engine's own spectrum, post-warp, log frequency (low at the bottom) —
+    the same rendering as the offline PNGs. Blue ticks mark a folded band's
+    original top edge: the gap between tick and energy is the gravity fold.
   </div>
 </div>
 <script src="params.js"></script>
