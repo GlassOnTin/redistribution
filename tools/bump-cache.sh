@@ -17,8 +17,9 @@ cur=$(grep -oE 'app\.js\?v=[0-9]+' index.html | grep -oE '[0-9]+$')
 next=$((cur + 1))
 
 sed -i -E "s/(app\.js\?v=)[0-9]+/\1$next/" index.html
-# selftest.html loads the worker directly, and may not exist yet.
-[ -f selftest.html ] && sed -i -E "s/(worker\.js\?v=)[0-9]+/\1$next/" selftest.html
+# selftest.html re-fetches the core files with its own ?v= (its worker URL
+# and fetches inherit it), so its entry script carries a buster too.
+[ -f selftest.html ] && sed -i -E "s/(selftest\.js\?v=)[0-9]+/\1$next/" selftest.html
 
 echo "asset version $cur -> $next"
 grep -nE '\?v=[0-9]+' index.html $([ -f selftest.html ] && echo selftest.html)
