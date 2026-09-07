@@ -23,8 +23,8 @@
     { key: 'tiltLow',   label: 'Tilt low',  min: -200, max: 200, step: 1, def: 0, unit: 'Hz', advanced: true, hint: 'Frequency shift, < 200 Hz group.' },
     { key: 'tiltMid',   label: 'Tilt mid',  min: -200, max: 200, step: 1, def: 0, unit: 'Hz', advanced: true, hint: 'Frequency shift, 200 Hz – 2 kHz group.' },
     { key: 'tiltHigh',  label: 'Tilt high', min: -200, max: 200, step: 1, def: 0, unit: 'Hz', advanced: true, hint: 'Frequency shift, > 2 kHz group.' },
-    { key: 'dry',       label: 'Dry',      min: 0, max: 1, step: 0.01, def: 1, advanced: true, hint: 'Parallel dry path.' },
-    { key: 'wet',       label: 'Wet',      min: 0, max: 1, step: 0.01, def: 1, advanced: true, hint: 'Processed path level.' },
+    { key: 'dry',       label: 'Dry',      min: 0, max: 1, step: 0.01, def: 0, advanced: true, hint: 'Parallel dry path. The engine bypass is an exact identity, so dry=1 doubles a neutral signal; raise it when Budget mangles the input and you want the original underneath.' },
+    { key: 'wet',       label: 'Wet',      min: 0, max: 1, step: 0.01, def: 1, advanced: true, hint: 'Processed path level. 0 = dry, 1 = fully processed (crossfade).' },
     { key: 'inGain',    label: 'In',       min: -24, max: 24, step: 0.5, def: 0, unit: 'dB', advanced: true, hint: 'Input trim.' },
     { key: 'outGain',   label: 'Out',      min: -24, max: 24, step: 0.5, def: 0, unit: 'dB', advanced: true, hint: 'Output trim.' },
     { key: 'exactEnergy', label: 'Exact energy', def: false, advanced: true, kind: 'bool', hint: 'Gravity fold conserves energy exactly (quadrature) instead of complex-sum.' },
@@ -44,15 +44,12 @@
   // identity (TDAC reconstruction), so the engine skips modification entirely.
   // Block switching stays active — the TDAC identity holds across any legal
   // window sequence, so switching still costs latency but not fidelity.
+  // Tilt is deliberately NOT in this predicate: it runs post-OLA at emission
+  // as an independent stage, so a neutral codec with a tilt is still bypass
+  // for the transform chain. Must stay in step with pipeline.js isBypass.
   function isBypass(p) {
-    return p.budget >= 0.999 &&
-      p.gravity <= 1e-6 &&
-      p.mask !== 'hide' &&
-      p.intensity <= 1e-6 &&
-      p.lock <= 1e-6 &&
-      Math.abs(p.tiltLow) < 1e-6 &&
-      Math.abs(p.tiltMid) < 1e-6 &&
-      Math.abs(p.tiltHigh) < 1e-6;
+    return p.budget >= 0.999 && p.gravity <= 1e-6 && p.mask !== 'hide' &&
+      p.intensity <= 1e-6 && p.lock <= 1e-6;
   }
 
   var mod = { PARAMS: PARAMS, DEFAULTS: DEFAULTS, budgetScale: budgetScale, isBypass: isBypass };

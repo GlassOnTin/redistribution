@@ -231,7 +231,8 @@
     // smoothed (frame-boundary applied) internal copies of continuous params
     var cur = { budget: 1, gravity: 0, memory: 2, hunt: 0.25, lock: 0.5,
       intensity: 0, level: -20, power: 0.7, curve: 'bark', mask: 'drop',
-      frame: 'long', exactEnergy: false };
+      frame: 'long', exactEnergy: false,
+      dry: 0, wet: 1, inGain: 0, outGain: 0 };
     var frameMode = 'long';             // applied without smoothing
 
     var stats = { frames: 0, longs: 0, shorts: 0, switches: 0, nanResets: 0 };
@@ -265,7 +266,8 @@
       tiltS[0].fill(0); tiltS[1].fill(0);
       cur = { budget: 1, gravity: 0, memory: 2, hunt: 0.25, lock: 0.5,
         intensity: 0, level: -20, power: 0.7, curve: 'bark', mask: 'drop',
-        frame: 'long', exactEnergy: false };
+        frame: 'long', exactEnergy: false,
+        dry: 0, wet: 1, inGain: 0, outGain: 0 };
       frameMode = String(P.frame || 'long');
     }
 
@@ -286,6 +288,13 @@
       cur.mask = P.mask === 'hide' ? 'hide' : 'drop';
       cur.curve = ['bark', 'power', 'linear'].indexOf(P.curve) >= 0 ? P.curve : 'bark';
       cur.exactEnergy = !!P.exactEnergy;
+      // Dry defaults to 0 and Wet to 1 (a crossfade): the engine's bypass is
+      // an exact identity, so a parallel dry+wet at 1/1 would double. With
+      // dry=0 the emitted stream is just the pipeline's output, untouched.
+      cur.dry += a * (((P.dry === undefined ? 0 : +P.dry)) - cur.dry);
+      cur.wet += a * (((P.wet === undefined ? 1 : +P.wet)) - cur.wet);
+      cur.inGain += a * (((P.inGain === undefined ? 0 : +P.inGain)) - cur.inGain);
+      cur.outGain += a * (((P.outGain === undefined ? 0 : +P.outGain)) - cur.outGain);
       var at = 0.25;
       tiltTarget[0] = +P.tiltLow || 0; tiltTarget[1] = +P.tiltMid || 0; tiltTarget[2] = +P.tiltHigh || 0;
       for (var g = 0; g < 3; g++) tiltNow[g] += at * (tiltTarget[g] - tiltNow[g]);
@@ -296,9 +305,10 @@
     // ---------- main entry: process n samples, return produced ----------
     function process(inBufL, inBufR, outBufL, outBufR, n) {
       var i;
+      var gIn = Math.pow(10, cur.inGain / 20);
       for (i = 0; i < n; i++) {
-        inL[ring(inPos + i)] = inBufL ? inBufL[i] : 0;
-        inR[ring(inPos + i)] = inBufR ? inBufR[i] : 0;
+        inL[ring(inPos + i)] = (inBufL ? inBufL[i] : 0) * gIn;
+        inR[ring(inPos + i)] = (inBufR ? inBufR[i] : 0) * gIn;
       }
       inPos += n;
 
@@ -325,6 +335,18 @@
       // filter bank is skipped entirely, so the bypass path is untouched.
       if (Math.abs(tiltNow[0]) > 1e-9 || Math.abs(tiltNow[1]) > 1e-9 || Math.abs(tiltNow[2]) > 1e-9) {
         applyTilt(outBufL, outBufR, give);
+      }
+      // Dry/Wet crossfade + output trim, at emission. readPos lags inPos by
+      // the pipeline latency and the input ring is not cleared on read, so
+      // inL/inR here still hold the matching input samples. Defaults (0, 1)
+      // make this exact: the bypass identity survives the blend arithmetic.
+      if (cur.dry !== 0 || cur.wet !== 1 || cur.outGain !== 0) {
+        var gDry = cur.dry, gWet = cur.wet, gOut = Math.pow(10, cur.outGain / 20);
+        for (i = 0; i < give; i++) {
+          var o = ring(readPos + i - give);   // input aligned with emitted sample
+          outBufL[i] = (gDry * inL[o] + gWet * outBufL[i]) * gOut;
+          outBufR[i] = (gDry * inR[o] + gWet * outBufR[i]) * gOut;
+        }
       }
       return give;
     }

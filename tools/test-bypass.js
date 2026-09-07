@@ -52,10 +52,11 @@ function makeSignal(seed) {
   return x;
 }
 
-function worstDiff(x, y, lo, hi) {
+function worstDiff(x, y, lo, hi, scale) {
   var w = 0, at = -1;
+  scale = scale || 1;
   for (var i = lo; i < hi; i++) {
-    var d = Math.abs(y[i] - x[i]);
+    var d = Math.abs(y[i] - x[i] * scale);
     if (d > w) { w = d; at = i; }
   }
   return { w: w, at: at };
@@ -158,6 +159,25 @@ t.test('full modify path at full budget is nearly an identity', function () {
   // value for ~10 frames, quantizing coarsely while it does
   var w = worstDiff(xp, r.y, PRIME + 10240, PRIME + N - 4096);
   t.ok(w.w < 0.02, 'high-budget modify path near-identity (worst ' + w.w.toExponential(2) + ' at ' + w.at + ')');
+});
+
+t.test('dry/wet crossfade and In/Out trims scale the emission', function () {
+  var x = makeSignal(7);
+  // cur.wet / cur.inGain ease at alpha 0.5 per frame from their defaults, so
+  // the first frames are mid-crossfade; compare only the settled tail
+  var LO = 8192, HI = N - 2048;
+  // wet 0.5 at bypass: out = 0.5 * x (dry 0 is the default)
+  var half = run(x, { wet: 0.5 });
+  var w = worstDiff(x, half.y, LO, HI, 0.5);
+  t.ok(w.w < 0.02, 'wet 0.5 halves a bypass signal once settled (worst ' + w.w.toExponential(2) + ')');
+  // in/out trims: +6 dB in, -6 dB out -> unity again
+  var trims = run(x, { inGain: 6, outGain: -6 });
+  w = worstDiff(x, trims.y, LO, HI, 1);
+  t.ok(w.w < 0.02, '+6 in / -6 out composes to unity (worst ' + w.w.toExponential(2) + ')');
+  // dry=1 at bypass doubles — the documented consequence of an exact-bypass engine
+  var dbl = run(x, { dry: 1 });
+  w = worstDiff(x, dbl.y, LO, HI, 1);
+  t.ok(w.w > 0.3 && w.w < 1.1, 'dry 1 at bypass doubles (worst ' + w.w.toFixed(3) + ')');
 });
 
 console.log(t.pass + '/' + (t.pass + t.fail) + ' tests pass, ' + t.checks + ' checks');
