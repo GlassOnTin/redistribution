@@ -503,9 +503,18 @@
       var dF = fs / (short ? W_S : W_L);
       var L = new Float64Array(B), thr = new Float64Array(B), demand = new Float64Array(B);
       var j, i;
+      // band level on a dBFS-anchored scale: the raw FFT energy depends on
+      // transform gain, so un-normalised it made the model's scale depend on
+      // how concentrated the material is — a sine piles its power into one
+      // bin and survives, while broadband program material spreads it thin
+      // and starved every band into silence (drums rendered to 0.003 peak at
+      // default settings). Normalise so a full-scale sine reads 0 dB, then
+      // apply the 96 dB SPL convention a real coder assumes, so Level
+      // (default -20 dB) reads as playback loudness against the ATH table.
+      var refMag = (short ? W_S : W_L) / Math.PI;
       for (j = 0; j < B; j++) {
         var fLo = bands.edge[j] * dF, fHi = (bands.edge[j + 1] - 1) * dF;
-        L[j] = 10 * Math.log10(Eb[j] + 1e-12) + cur.level;
+        L[j] = 10 * Math.log10(Eb[j] / (refMag * refMag) + 1e-12) + 96 + cur.level;
         thr[j] = ath((fLo + fHi) / 2);
       }
       // spreading: a masker raises neighbours' thresholds. Upper slope

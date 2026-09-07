@@ -20,7 +20,9 @@ function run(hunt, seed) {
     rng: seed !== undefined ? P.mulberry32(seed) : undefined
   });
   var d = eng.params;
-  d.budget = 0.5; d.gravity = 0; d.hunt = hunt; d.lock = 0; d.memory = 30; d.level = 0; d.mask = 'drop';
+  // level -40: the allocation scale is now dBFS-anchored (+96 offset), so
+  // -40 restores the effective level this fixture was calibrated at
+  d.budget = 0.5; d.gravity = 0; d.hunt = hunt; d.lock = 0; d.memory = 30; d.level = -40; d.mask = 'drop';
   var bits = [], snaps = [];
   eng.onBins = function (mL, mR, K, short) {
     if (short) return;

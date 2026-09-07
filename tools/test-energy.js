@@ -116,7 +116,10 @@ t.test('plain complex-sum fold partially cancels', function () {
 
 t.test('drop zeroes starved bands; hide buries them under the neighbour', function () {
   var x = sigN(5);
-  var base = { budget: 0.15, gravity: 0, hunt: 0, lock: 0, level: -20 };
+  // level -60: the allocation scale is now dBFS-anchored (+96 offset), so
+  // -60 keeps this bed below threshold — the fixture needs everything
+  // starved for the drop/hide comparison to bite
+  var base = { budget: 0.15, gravity: 0, hunt: 0, lock: 0, level: -60 };
   function measure(mask) {
     var eng = makeEng(Object.assign({ mask: mask }, base));
     var totals = [], starvedEs = [];
