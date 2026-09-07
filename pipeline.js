@@ -181,6 +181,7 @@
   function createEngine(fs, opts) {
     opts = opts || {};
     var rng = opts.rng || mulberry32(0x5eed11);
+    var rngSeed = opts.rng ? null : 0x5eed11;   // reset() re-seeds the built-in
 
     var W_L = 2048, H_L = 1024, K_L = W_L >> 1;
     var W_S = 512, H_S = 256, K_S = W_S >> 1;
@@ -269,6 +270,9 @@
         frame: 'long', exactEnergy: false,
         dry: 0, wet: 1, inGain: 0, outGain: 0 };
       frameMode = String(P.frame || 'long');
+      // the hunt dither's PRNG state is part of the engine state: without
+      // re-seeding, a reset instance allocates differently from a fresh one
+      if (rngSeed !== null) rng = mulberry32(rngSeed);
     }
 
     function ring(a) { return a & RMASK; }

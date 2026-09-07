@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Redistribution — a perceptual-coder pedal</title>
+<link rel="icon" href="data:,">
+<script>
+// Pre-module error trap: app.js is loaded as a module, so any script error
+// before it runs must be captured here and surfaced by app.js on arrival.
+window.__preModuleErrors = [];
+window.addEventListener('error', function (e) {
+  window.__preModuleErrors.push(e.message + ' @ ' + e.filename + ':' + e.lineno);
+});
+</script>
+<style>
+:root { color-scheme: dark; }
+body { background: #0b0a12; color: #cfd2dc; font: 14px/1.5 system-ui, sans-serif;
+  margin: 0; display: flex; }
+h1 { font-size: 18px; margin: 0 0 4px; color: #efe9d8; }
+#left { width: 340px; padding: 16px; box-sizing: border-box; }
+#right { flex: 1; padding: 16px 16px 16px 0; }
+#spec { width: 100%; height: 60vh; background: #080614; border: 1px solid #221d33;
+  display: block; }
+#status { font-size: 12px; min-height: 18px; }
+#latency { font-size: 11px; color: #6c7080; min-height: 14px; }
+button { background: #221d33; color: #cfd2dc; border: 1px solid #3a3354;
+  border-radius: 4px; padding: 4px 12px; cursor: pointer; }
+button:disabled { opacity: 0.4; cursor: default; }
+select { background: #221d33; color: #cfd2dc; border: 1px solid #3a3354;
+  border-radius: 4px; padding: 3px 6px; }
+.prow { display: grid; grid-template-columns: 82px 1fr 64px; gap: 6px;
+  align-items: center; margin: 3px 0; font-size: 13px; }
+.prow input[type=range] { width: 100%; }
+.pval { font-size: 11px; color: #8f93a3; text-align: right; }
+details { margin-top: 10px; }
+summary { cursor: pointer; color: #8f93a3; }
+.row { margin: 8px 0; display: flex; gap: 8px; align-items: center; }
+a { color: #8f93a3; }
+</style>
+</head>
+<body>
+<div id="left">
+  <h1>Redistribution</h1>
+  <div>The decisions of a perceptual codec, as musical controls.</div>
+  <div class="row">
+    <button id="start">Start</button>
+    <select id="loopsel" disabled>
+      <option value="drums">Drums</option>
+      <option value="pad">Pad chords</option>
+      <option value="arp">Arp</option>
+      <option value="sweep">Chirp sweep</option>
+    </select>
+    <button id="play" disabled>Play</button>
+  </div>
+  <div class="row"><button id="panic">Reset engine</button>
+    <a href="selftest.html" style="margin-left:auto">selftest</a></div>
+  <div id="params-named"></div>
+  <details>
+    <summary>Advanced</summary>
+    <div id="params-adv"></div>
+  </details>
+  <div id="status"></div>
+  <div id="latency"></div>
+</div>
+<div id="right">
+  <canvas id="spec" width="900" height="512"></canvas>
+  <div style="font-size:11px;color:#6c7080">
+    Band energies from inside the codec, log frequency (low at the bottom).
+    The warp is the codec's own destination-edge map — bands that ran out of
+    budget fold downward.
+  </div>
+</div>
+<script src="params.js"></script>
+<script src="loops.js"></script>
+<script type="module" src="app.js"></script>
+</body>
+</html>
