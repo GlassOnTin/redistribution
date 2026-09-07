@@ -1,0 +1,11 @@
+{
+  "name": "redistribution",
+  "version": "0.1.0",
+  "description": "A perceptual-coder effect pedal and synth, entirely in the browser. The codec's decisions are the instrument.",
+  "private": true,
+  "type": "commonjs",
+  "scripts": {
+    "test": "node tools/test-all.js"
+  },
+  "license": "AGPL-3.0-only"
+}
