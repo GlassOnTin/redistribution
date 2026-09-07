@@ -168,13 +168,13 @@
   }
 
   // Bypass fast path: every mechanism neutral -> the transform chain is an
-  // exact identity, so modification is skipped entirely. Kept local so
-  // pipeline.js stays load-order independent of params.js.
+  // exact identity, so modification is skipped entirely. Tilt is NOT part of
+  // this: it runs post-OLA at emission time as an independent stage, so a
+  // neutral codec with a frequency tilt is still "bypass" for the transform
+  // chain. Kept local so pipeline.js stays load-order independent of params.js.
   function isBypass(P) {
     return P.budget >= 0.999 && P.gravity <= 1e-6 && P.mask !== 'hide' &&
-      P.intensity <= 1e-6 && P.lock <= 1e-6 &&
-      Math.abs(P.tiltLow) < 1e-6 && Math.abs(P.tiltMid) < 1e-6 &&
-      Math.abs(P.tiltHigh) < 1e-6;
+      P.intensity <= 1e-6 && P.lock <= 1e-6;
   }
 
   // ---------- the engine ----------
@@ -262,6 +262,7 @@
       state = 'long'; shortsInGroup = 0; switchLockout = 0;
       transientRun = 0; quietRun = 0; prevTopE = null;
       tiltPhase = [0, 0, 0]; tiltNow = [0, 0, 0];
+      tiltS[0].fill(0); tiltS[1].fill(0);
       cur = { budget: 1, gravity: 0, memory: 2, hunt: 0.25, lock: 0.5,
         intensity: 0, level: -20, power: 0.7, curve: 'bark', mask: 'drop',
         frame: 'long', exactEnergy: false };
@@ -319,6 +320,12 @@
       }
       readPos += give;
       for (i = give; i < n; i++) { outBufL[i] = 0; outBufR[i] = 0; }
+      // Tilt is post-OLA, applied to the emitted samples only (the ring's
+      // samples are consumed once). Neutral tilt is the identity and the
+      // filter bank is skipped entirely, so the bypass path is untouched.
+      if (Math.abs(tiltNow[0]) > 1e-9 || Math.abs(tiltNow[1]) > 1e-9 || Math.abs(tiltNow[2]) > 1e-9) {
+        applyTilt(outBufL, outBufR, give);
+      }
       return give;
     }
     engine.process = process;
@@ -423,7 +430,6 @@
         foldAndMask(bands, B, K, Eb, short);
         applyIntensity(bands, B);
         applyLock(bands, B, K, hop, w, short);
-        applyTilt(K, hop);
       } else {
         // the warp overlay reads destEdge even in a neutral preset: leave it
         // as the identity map, not the zero-filled initial array
@@ -863,31 +869,66 @@
       }
     }
 
-    // ---------- Tilt: per-group phase rotation (frequency shift) ----------
-    function applyTilt(K, hop) {
-      tiltPhase[0] += 2 * Math.PI * tiltNow[0] * hop / fs;
-      tiltPhase[1] += 2 * Math.PI * tiltNow[1] * hop / fs;
-      tiltPhase[2] += 2 * Math.PI * tiltNow[2] * hop / fs;
-      if (tiltPhase[0] > 2 * Math.PI) tiltPhase[0] -= 2 * Math.PI;
-      if (tiltPhase[1] > 2 * Math.PI) tiltPhase[1] -= 2 * Math.PI;
-      if (tiltPhase[2] > 2 * Math.PI) tiltPhase[2] -= 2 * Math.PI;
-      var dF = fs / (K === K_S ? W_S : W_L);
-      var b1 = Math.max(2, Math.round(200 / dF));
-      var b2 = Math.max(b1 + 1, Math.round(2000 / dF));
-      if (b2 > K - 1) b2 = K - 1;
-      var groups = [[1, Math.min(b1, K - 1)], [b1, b2], [b2, K - 1]];
-      for (var g = 0; g < 3; g++) {
-        if (Math.abs(tiltNow[g]) < 1e-9) continue;
-        var th = tiltPhase[g], cr = Math.cos(th), ci = Math.sin(th);
-        for (var c = 0; c < 2; c++) {
-          var zr = zRe[c], zi = zIm[c];
-          for (var b = groups[g][0]; b < groups[g][1]; b++) {
-            var rr = zr[b] * cr - zi[b] * ci;
-            var ri = zr[b] * ci + zi[b] * cr;
-            zr[b] = rr; zi[b] = ri;
-          }
-        }
+    // ---------- Tilt: post-OLA per-group DSB shift ----------
+    // The earlier per-frame bin rotation could not shift: a constant per-frame
+    // phase offset is invisible within a frame, and its inter-frame staircase
+    // collapses any shift near a multiple of fs/hop (46.875 Hz). The shift now
+    // runs on the finalised output samples: an LR4 3-way split (2x Butterworth
+    // LP at 200 Hz, 2x HP at 2000 Hz, mid by complementary subtraction) with
+    // each group ring-modulated by cos(2*Pi*s*t). A tone f becomes sidebands
+    // at f+-s and no carrier — the down-shifted image is the planned phaser
+    // character, not a bug.
+    var tiltFilt = null;
+    function initTilt() {
+      // RBJ biquads, normalised. Two cascaded Butterworth sections each side
+      // make the LR4 edges; the mid band is the complementary remainder, so
+      // lp + bp + hp == x exactly and a neutral tilt is an identity.
+      function rbj(type, f0, Q) {
+        var w0 = 2 * Math.PI * f0 / fs, cw = Math.cos(w0), sn = Math.sin(w0);
+        var al = sn / (2 * Q), a0 = 1 + al;
+        var b0, b1, b2;
+        if (type === 'lp') { b0 = (1 - cw) / 2; b1 = 1 - cw; b2 = (1 - cw) / 2; }
+        else { b0 = (1 + cw) / 2; b1 = -(1 + cw); b2 = (1 + cw) / 2; }
+        return [b0 / a0, b1 / a0, b2 / a0, -2 * cw / a0, (1 - al) / a0];
       }
+      tiltFilt = { lp: rbj('lp', 200, Math.SQRT1_2), hp: rbj('hp', 2000, Math.SQRT1_2) };
+    }
+    initTilt();
+    // per-channel biquad state, direct form I: [x1, x2, y1, y2] for each of
+    // the two LP sections and two HP sections. tiltPhase is the shared
+    // ring-mod phase state declared with the other engine state above.
+    var tiltS = [ [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                  [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] ];
+    function biquad(x, c, s, o) {
+      var y = c[0] * x + c[1] * s[o] + c[2] * s[o + 1] - c[3] * s[o + 2] - c[4] * s[o + 3];
+      s[o + 1] = s[o]; s[o] = x; s[o + 3] = s[o + 2]; s[o + 2] = y;
+      return y;
+    }
+    function applyTilt(bufL, bufR, n) {
+      var clp = tiltFilt.lp, chp = tiltFilt.hp;
+      var w0 = 2 * Math.PI * tiltNow[0] / fs, w1 = 2 * Math.PI * tiltNow[1] / fs, w2 = 2 * Math.PI * tiltNow[2] / fs;
+      var p0 = tiltPhase[0], p1 = tiltPhase[1], p2 = tiltPhase[2];
+      var TwoPi = 2 * Math.PI;
+      // One oscillator shared by both channels: the phase advances once per
+      // sample INDEX, not once per sample-channel. Advancing inside a
+      // per-channel loop doubles the shift rate (the ch=1 pass adds another
+      // n·w to the saved phase before the next call's ch=0 pass).
+      for (var i = 0; i < n; i++) {
+        var c0 = Math.cos(p0), c1 = Math.cos(p1), c2 = Math.cos(p2);
+        for (var ch = 0; ch < 2; ch++) {
+          var buf = ch === 0 ? bufL : bufR;
+          var s = tiltS[ch];
+          var x = buf[i];
+          var lp = biquad(biquad(x, clp, s, 0), clp, s, 4);
+          var hp = biquad(biquad(x, chp, s, 8), chp, s, 12);
+          var bp = x - lp - hp;
+          buf[i] = lp * c0 + bp * c1 + hp * c2;
+        }
+        p0 += w0; if (p0 > TwoPi) p0 -= TwoPi;
+        p1 += w1; if (p1 > TwoPi) p1 -= TwoPi;
+        p2 += w2; if (p2 > TwoPi) p2 -= TwoPi;
+      }
+      tiltPhase[0] = p0; tiltPhase[1] = p1; tiltPhase[2] = p2;
     }
 
     return engine;

@@ -37,7 +37,7 @@
   // Polyphony scales the effective bit budget. 1 voice -> 1.00, 8 -> 0.37, 16 -> 0.22.
   function budgetScale(voices) {
     if (!(voices > 1)) return 1;
-    return 1 / (1 + 0.12 * (voices - 1));
+    return 1 / (1 + 0.24 * (voices - 1));
   }
 
   // Fast path: with every mechanism neutral the transform chain is an exact
