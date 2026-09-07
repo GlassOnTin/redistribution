@@ -87,12 +87,30 @@ function stopLoop() {
 }
 
 // ---------- params ----------
+// log_2 slider law (Budget): the slider position is an exponent, so equal
+// moves are equal RATIOS of budget. Bits are a power-of-two domain (per-band
+// scalefactors are 2^sf), and the audible action sits in the low end — a
+// linear slider spent half its travel on 0.5..1, which all sounds alike,
+// while the interesting 0.05..0.2 got 0.01 steps. t = 0 is a true zero
+// (nothing coded); the exponent runs [log2Min, log2Max] across the travel.
+function sliderToVal(meta, t) {
+  t = parseFloat(t);
+  if (!(t > 0)) return 0;
+  return Math.pow(2, meta.log2Min + (meta.log2Max - meta.log2Min) * t);
+}
+function valToSlider(meta, v) {
+  if (!(v > 0)) return 0;
+  return (Math.log2(v) - meta.log2Min) / (meta.log2Max - meta.log2Min);
+}
+
 function currentParams() {
   const p = {};
   for (const el of document.querySelectorAll('[data-param]')) {
     const meta = RDParams.PARAMS.find((q) => q.key === el.dataset.param);
     p[el.dataset.param] = meta && meta.options ? el.value
-      : meta && meta.kind === 'bool' ? el.checked : parseFloat(el.value);
+      : meta && meta.kind === 'bool' ? el.checked
+      : meta && meta.log2 ? sliderToVal(meta, el.value)
+      : parseFloat(el.value);
   }
   return p;
 }
@@ -158,11 +176,18 @@ function buildParamUI() {
     } else {
       input = document.createElement('input');
       input.type = 'range';
-      input.min = meta.min; input.max = meta.max; input.step = meta.step;
-      input.value = meta.def;
+      if (meta.log2) {
+        input.min = 0; input.max = 1; input.step = 0.001;
+        input.value = valToSlider(meta, meta.def);
+      } else {
+        input.min = meta.min; input.max = meta.max; input.step = meta.step;
+        input.value = meta.def;
+      }
       const val = document.createElement('span');
       val.className = 'pval';
-      const show = () => { val.textContent = meta.unit === 's' && meta.log
+      const show = () => { val.textContent = meta.log2
+        ? sliderToVal(meta, input.value).toFixed(3)
+        : meta.unit === 's' && meta.log
         ? (+input.value).toFixed(2) + ' s'
         : input.value + (meta.unit ? ' ' + meta.unit : ''); };
       input.addEventListener('input', show); show();
@@ -173,7 +198,8 @@ function buildParamUI() {
     input.id = 'p-' + meta.key;
     input.addEventListener('input', () => {
       if (row._val && input.type === 'range') {
-        row._val.textContent = (meta.log ? (+input.value).toFixed(2) : input.value) +
+        row._val.textContent = (meta.log2 ? sliderToVal(meta, input.value).toFixed(3)
+          : (meta.log ? (+input.value).toFixed(2) : input.value)) +
           (meta.unit ? ' ' + meta.unit : '');
       }
       sendAllParams();

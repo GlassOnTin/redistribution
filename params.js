@@ -8,7 +8,9 @@
   // Order matters: it is the UI order. The six named controls first, switches
   // next, the advanced group last (rendered inside <details>).
   var PARAMS = [
-    { key: 'budget',    label: 'Budget',   min: 0, max: 1, step: 0.01, def: 0.85, hint: 'Bits per frame. As it falls the allocator stops coding everything and starts moving things.' },
+    { key: 'budget',    label: 'Budget',   min: 0, max: 1, step: 0.01, def: 0.85,
+      log2: true, log2Min: -10, log2Max: 0,
+      hint: 'Bits per frame, log_2 slider: each equal move halves the budget. As it falls the allocator stops coding everything and starts moving things.' },
     { key: 'gravity',   label: 'Gravity',  min: 0, max: 1, step: 0.01, def: 0, hint: 'Starved bands remap downward in frequency instead of quantizing down.' },
     { key: 'memory',    label: 'Memory',   min: 0.1, max: 30, step: 0.01, def: 2, log: true, unit: 's', hint: 'Time constant of the redistribution map. Long: the ghost of the last seconds survives silence.' },
     { key: 'hunt',      label: 'Hunt',     min: 0, max: 1, step: 0.01, def: 0.25, hint: 'Allocator smoothing. Low: audible allocation churn. High: frozen, stodgy allocation.' },
