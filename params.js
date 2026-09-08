@@ -15,6 +15,12 @@
     { key: 'memory',    label: 'Memory',   min: 0.1, max: 30, step: 0.01, def: 2, log: true, unit: 's', hint: 'Time constant of the redistribution map. Long: the ghost of the last seconds survives silence.' },
     { key: 'hunt',      label: 'Hunt',     min: 0, max: 1, step: 0.01, def: 0.25, hint: 'Allocator smoothing. Low: audible allocation churn. High: frozen, stodgy allocation.' },
     { key: 'lock',      label: 'Lock',     min: 0, max: 1, step: 0.01, def: 0.5, hint: 'Per-band phase loop bandwidth. Tight: bands snap. Open: bands drift and smear.' },
+    { key: 'follow',    label: 'Follow',   min: 0, max: 1, step: 0.01, def: 0,
+      hint: "Pull the loudest partial to the nearest tone of the detected chord and bloom its harmonics. Chord is read from the codec's own allocation." },
+    { key: 'melody',    label: 'Melody',   def: false, kind: 'bool',
+      hint: 'A mono synth voice plays the chord the codec holds. Register follows the Memory map, Hunt drives the jumps, Budget starvation thins the line.' },
+    { key: 'density',   label: 'Density',  min: 0, max: 1, step: 0.01, def: 0.5,
+      hint: 'Melody step rate: slow eighth-note-ish at 0 to busy at 1. Onsets at high density sometimes double an octave down.' },
     { key: 'curve',     label: 'Curve',    def: 'bark', options: ['bark', 'power', 'linear'], hint: 'Frequency-axis warp of the fold.' },
     { key: 'frame',     label: 'Frame',    def: 'long', options: ['long', 'short', 'adaptive'], hint: 'Block size. The switch itself is audible by design.' },
     { key: 'mask',      label: 'Mask',     def: 'drop', options: ['drop', 'hide'], hint: 'Sub-threshold bands: dropped, or hidden under a louder neighbour.' },
@@ -51,7 +57,7 @@
   // for the transform chain. Must stay in step with pipeline.js isBypass.
   function isBypass(p) {
     return p.budget >= 0.999 && p.gravity <= 1e-6 && p.mask !== 'hide' &&
-      p.intensity <= 1e-6 && p.lock <= 1e-6;
+      p.intensity <= 1e-6 && p.lock <= 1e-6 && !(p.follow > 1e-6);
   }
 
   var mod = { PARAMS: PARAMS, DEFAULTS: DEFAULTS, budgetScale: budgetScale, isBypass: isBypass };

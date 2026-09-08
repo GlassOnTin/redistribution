@@ -197,6 +197,16 @@ function makeSynthWorklet() {
     t.ok(m.edge instanceof Int32Array && m.destEdge instanceof Int32Array,
       'edge maps present');
     t.ok(typeof m.fs === 'number' && m.fs === 48000, 'fs reported');
+    // composer inputs riding the taps payload
+    t.ok(typeof m.start === 'number' && m.start >= 0, 'engine sample clock present');
+    t.ok(m.chord === null || (m.chord.root >= 0 && m.chord.root <= 11 &&
+      ['major', 'minor', 'dom7'].indexOf(m.chord.quality) >= 0 &&
+      typeof m.chord.confidence === 'number'),
+      'chord readout well-formed (' + JSON.stringify(m.chord) + ')');
+    t.ok(typeof m.centroid === 'number' && isFinite(m.centroid),
+      'memory-map centroid present (' + (m.centroid || 0).toFixed(2) + ')');
+    t.ok(typeof m.starvedN === 'number' && m.starvedN >= 0,
+      'starved-band count present (' + m.starvedN + ')');
     // gates off again
     node.port.onmessage({ data: { type: 'taps', on: false } });
     var before = node.__posted.length;

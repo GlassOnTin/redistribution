@@ -25,12 +25,39 @@ The live waterfall paints the engine's own post-warp spectrum with the same
 renderer as the offline PNGs (72 dB floor, log frequency), plus blue ticks
 marking each folded band's original top edge. Save PNG exports it.
 
+## Chord, Follow, Melody
+
+The codec's decisions drive three things beyond the fold itself.
+
+**Chord** — every long frame, the engine builds a pitch-class histogram from
+its own spectrum, weighted by each band's energy and bit allocation, and
+template-matches major / minor / dom7. The held chord updates by a sliding
+vote, so it fades between chords instead of snapping. The readout next to the
+waterfall shows what it currently holds. It is deliberately imprecise: a
+strong out-of-chord tone usually joins the held chord (F#5 over an Am pad
+reads as D7), and dyads flip quality while the root holds.
+
+**Follow** — pulls the frame's loudest partial to the nearest tone of the held
+chord (the original stays; the copy is additive) and blooms two harmonics
+above it. Placement quantises to the frame's frequency grid (±11.7 Hz at
+Frame=long), and a copy landing on a bin that already carries a tone can
+cancel it — a wobble inherited from the Lock family. Long frames only.
+
+**Melody** — a mono synth voice that sings the held chord. Its register
+follows the Memory map's centroid, Hunt flattens its wander from stepwise
+walk to jumps, and Budget starvation thins the line (starved non-onset notes
+are skipped). Its own spectral-flux onset gate re-triggers on hits; step
+timing rides the engine's frame clock and jitters by up to one frame plus
+event-loop delay. With no held chord the voice rests.
+
 ## Verification
 
-- `node tools/test-all.js` — 10 gates, ~4800 checks, zero dependencies:
+- `node tools/test-all.js` — 13 gates, ~5300 checks, zero dependencies:
   transform/TDAC bypass identity, energy conservation through the fold,
   gravity/memory/hunt time constants, block-switch windows, tilt shift,
-  synth voice bank, worklet == offline render sample-identical.
+  chord detection on synthetic + loop material, the Follow transform,
+  the composer state machine, synth voice bank, worklet == offline render
+  sample-identical.
 - `selftest.html` — in-browser ladder: live graph == worker.js render,
   residual 0.00e+0 over 20 segments on this machine.
 - Deployed site verified in-browser: console clean, spectrogram draws,
@@ -67,6 +94,7 @@ pipeline.js   the algorithm — dual-loaded (script tag / worklet blob / node)
 params.js     param schema, single source of truth for UI, worklet, tests
 loops.js      synthesized loops (page menu and node tests share the code)
 synth.js      16-voice band-limited wavetable bank
+composer.js   melody voice — main thread, eats the effect's taps
 wav.js  png.js  WAV + PNG, zero-dependency
 worklet-effect.js  worklet-synth.js  AudioWorkletProcessors
 tools/        test-all.js + test-*.js, bench-core.js, render.js, bump-cache.sh

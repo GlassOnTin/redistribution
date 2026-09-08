@@ -151,6 +151,93 @@
     return r;
   }
 
+  // ---------- chord detection ----------
+  // Pitch-class histogram from spectral peaks, weighted by the codec's
+  // allocation (bits are its salience measure). Per-BIN mapping is wrong at
+  // long-frame resolution — 23 Hz bins cannot place a semitone below ~500 Hz
+  // — so the histogram is built from local maxima instead: each peak's
+  // frequency is parabolic-interpolated (sub-bin), its weight is the local
+  // mainlobe energy times the bit boost of its band, and the weight splits
+  // fractionally between the two pitch classes it falls between. Resolution
+  // is still the frame's: overlapping low mainlobes blur the fundamentals
+  // and the detected shape wobbles (root mostly holds, quality wanders
+  // between relatives). That imprecision is part of the pedal's character —
+  // the engine's vote smooths the root, and a wobbling quality is a colour
+  // change, not an error. Templates are scored as the SUM of their classes
+  // (a clean triad scores 1.0; dom7 only wins when its 4th tone carries
+  // weight). Quality is gated on margin (a lone tone ties every shape);
+  // the root itself is always the argmax — the caller votes on it.
+  var CHORD_TEMPLATES = [
+    ['major', [0, 4, 7]],
+    ['minor', [0, 3, 7]],
+    ['dom7', [0, 4, 7, 10]]
+  ];
+  var CHORD_MARGIN = 0.08;
+
+  function detectChord(mags, bits, edge, fs, W, B) {
+    var hist = new Float64Array(12), tot = 0;
+    var K = W >> 1, binHz = fs / W;
+    var b = 0;
+    for (var k = 2; k < K - 1; k++) {
+      if (!(mags[k] > mags[k - 1] && mags[k] >= mags[k + 1])) continue;
+      // parabolic interpolation in log magnitude: sub-bin peak position
+      var la = Math.log(mags[k - 1] + 1e-12), lb = Math.log(mags[k] + 1e-12),
+        lc = Math.log(mags[k + 1] + 1e-12);
+      var den = la - 2 * lb + lc;
+      var dp = den !== 0 ? 0.5 * (la - lc) / den : 0;
+      if (dp > 1 || dp < -1) dp = 0;
+      while (b < B - 1 && edge[b + 1] <= k) b++;
+      var w = mags[k - 1] * mags[k - 1] + mags[k] * mags[k] +
+        mags[k + 1] * mags[k + 1];
+      if (bits) w *= 1 + bits[b] / MAX_BITS_PER_BAND;
+      var x = 12 * Math.log2(((k + dp) * binHz) / 440) + 69;
+      var x0 = Math.floor(x), frac = x - x0;
+      hist[((x0 % 12) + 12) % 12] += w * (1 - frac);
+      hist[(((x0 + 1) % 12) + 12) % 12] += w * frac;
+      tot += w;
+    }
+    var out = { root: -1, quality: null, score: 0, margin: 0, hist: hist };
+    if (!(tot > 0)) return out;
+    for (var pc = 0; pc < 12; pc++) hist[pc] /= tot;
+    var bestScore = -1, bestRoot = -1, bestQual = null, otherScore = -1;
+    for (var r = 0; r < 12; r++) {
+      for (var ti = 0; ti < CHORD_TEMPLATES.length; ti++) {
+        var pcs = CHORD_TEMPLATES[ti][1], s = 0;
+        for (var q = 0; q < pcs.length; q++) s += hist[(r + pcs[q]) % 12];
+        if (s > bestScore) {
+          if (r !== bestRoot) otherScore = bestScore;
+          bestScore = s; bestRoot = r; bestQual = CHORD_TEMPLATES[ti][0];
+        } else if (s > otherScore && r !== bestRoot) {
+          otherScore = s;
+        }
+      }
+    }
+    out.root = bestRoot; out.score = bestScore;
+    out.margin = bestScore - Math.max(0, otherScore);
+    if (out.margin >= CHORD_MARGIN) out.quality = bestQual;
+    return out;
+  }
+
+  // Signed interval in [-6, 5] semitones from a frequency to the nearest
+  // tone of a chord (root 0-11 + quality name). The pitch class is rounded
+  // to the semitone grid first — a fractional pc would give a fractional
+  // interval and scatter the follow copy off-key. Returns null for a
+  // qualityless chord (nothing to follow).
+  function followInterval(f0, root, quality) {
+    var pcs = null;
+    for (var ti = 0; ti < CHORD_TEMPLATES.length; ti++)
+      if (CHORD_TEMPLATES[ti][0] === quality) pcs = CHORD_TEMPLATES[ti][1];
+    if (!pcs) return null;
+    var x = Math.round(12 * Math.log2(f0 / 440) + 69) % 12;
+    if (x < 0) x += 12;
+    var n = 0, best = 99;
+    for (var q = 0; q < pcs.length; q++) {
+      var d = ((root + pcs[q] - x + 18) % 12) - 6;
+      if (Math.abs(d) < best) { best = Math.abs(d); n = d; }
+    }
+    return n;
+  }
+
   // Overlap map: for each short band, the [longIdx, weight] pairs covering it.
   function buildLongShortMap(bandsL, bandsS) {
     var BL = bandCount(bandsL), BS = bandCount(bandsS);
@@ -174,7 +261,7 @@
   // chain. Kept local so pipeline.js stays load-order independent of params.js.
   function isBypass(P) {
     return P.budget >= 0.999 && P.gravity <= 1e-6 && P.mask !== 'hide' &&
-      P.intensity <= 1e-6 && P.lock <= 1e-6;
+      P.intensity <= 1e-6 && P.lock <= 1e-6 && !(P.follow > 1e-6);
   }
 
   // ---------- the engine ----------
@@ -231,12 +318,68 @@
 
     // smoothed (frame-boundary applied) internal copies of continuous params
     var cur = { budget: 1, gravity: 0, memory: 2, hunt: 0.25, lock: 0.5,
-      intensity: 0, level: -20, power: 0.7, curve: 'bark', mask: 'drop',
-      frame: 'long', exactEnergy: false,
+      follow: 0, intensity: 0, level: -20, power: 0.7, curve: 'bark',
+      mask: 'drop', frame: 'long', exactEnergy: false,
       dry: 0, wet: 1, inGain: 0, outGain: 0 };
     var frameMode = 'long';             // applied without smoothing
 
     var stats = { frames: 0, longs: 0, shorts: 0, switches: 0, nanResets: 0 };
+
+    // held chord, decided by a sliding vote over the last CHORD_VOTE_N
+    // frames (~0.4 s). Frame-level detection wobbles — overlapping low
+    // mainlobes blur the fundamentals, and the argmax root hops between
+    // relatives — so no single frame is trusted: a root is adopted when it
+    // takes NEED of the last N votes. Quality is the mode among those
+    // frames' gated qualities; if none cleared the margin gate the chord
+    // reads qualityless. A frame of silence votes for nothing and lets the
+    // held chord decay rather than snapping off.
+    var chord = { root: -1, quality: null, confidence: 0 };
+    var CHORD_VOTE_N = 9, CHORD_VOTE_NEED = 5;
+    var voteRoots = new Int32Array(CHORD_VOTE_N).fill(-2);
+    var voteQuals = new Array(CHORD_VOTE_N).fill(null);
+    var votePos = 0, voteFill = 0;
+
+    var chordMags = new Float32Array(K_L);   // per-bin L+R magnitude, reused
+
+    function updateChord(mags, bands, B, short, bits) {
+      var det = detectChord(mags, bits, bands.edge, fs, short ? W_S : W_L, B);
+      voteRoots[votePos] = det.root;
+      voteQuals[votePos] = det.quality;
+      votePos = (votePos + 1) % CHORD_VOTE_N;
+      if (voteFill < CHORD_VOTE_N) voteFill++;
+
+      var counts = new Int32Array(13);          // 12 roots + silence slots
+      var qualTally = {};                       // "root/quality" -> n
+      for (var v = 0; v < CHORD_VOTE_N; v++) {
+        var rv = voteRoots[v];
+        if (rv < 0) continue;                   // empty slot or silence
+        counts[rv]++;
+        if (voteQuals[v]) {
+          var key = rv + '/' + voteQuals[v];
+          qualTally[key] = (qualTally[key] || 0) + 1;
+        }
+      }
+      var bestRoot = -1, bestCount = 0;
+      for (var r = 0; r < 12; r++) {
+        if (counts[r] > bestCount) { bestCount = counts[r]; bestRoot = r; }
+      }
+      if (bestCount >= CHORD_VOTE_NEED) {
+        var qBest = null, qN = 0;
+        for (var key2 in qualTally) {
+          if (key2.indexOf(bestRoot + '/') === 0 && qualTally[key2] > qN) {
+            qN = qualTally[key2]; qBest = key2.split('/')[1];
+          }
+        }
+        chord.root = bestRoot;
+        chord.quality = qBest;
+        chord.confidence = bestCount / voteFill;
+      } else {
+        chord.confidence *= 0.9;
+        if (chord.confidence < 0.1) {
+          chord.root = -1; chord.quality = null; chord.confidence = 0;
+        }
+      }
+    }
 
     // tap state for the spectrogram / overlay
     var bandsE = new Float32Array(BL);
@@ -250,6 +393,7 @@
       onFrame: null,   // fn(info) after each frame
       onBins: null,    // fn(magL, magR, K) after each frame, pre-inversion
       onEvent: null,   // fn({type:'switch'|'nan', ...})
+      chord: chord,    // {root, quality, confidence} — the held chord readout
       reset: reset
     };
 
@@ -263,11 +407,13 @@
       inPos = 0; readPos = 0; emitPos = 0; frameStart = 0;
       state = 'long'; shortsInGroup = 0; switchLockout = 0;
       transientRun = 0; quietRun = 0; prevTopE = null;
+      chord.root = -1; chord.quality = null; chord.confidence = 0;
+      voteRoots.fill(-2); voteQuals.fill(null); votePos = 0; voteFill = 0;
       tiltPhase = [0, 0, 0]; tiltNow = [0, 0, 0];
       tiltS[0].fill(0); tiltS[1].fill(0);
       cur = { budget: 1, gravity: 0, memory: 2, hunt: 0.25, lock: 0.5,
-        intensity: 0, level: -20, power: 0.7, curve: 'bark', mask: 'drop',
-        frame: 'long', exactEnergy: false,
+        follow: 0, intensity: 0, level: -20, power: 0.7, curve: 'bark',
+        mask: 'drop', frame: 'long', exactEnergy: false,
         dry: 0, wet: 1, inGain: 0, outGain: 0 };
       frameMode = String(P.frame || 'long');
       // the hunt dither's PRNG state is part of the engine state: without
@@ -286,6 +432,7 @@
       cur.memory += a * ((+P.memory || 2) - cur.memory);
       cur.hunt += a * ((+P.hunt || 0) - cur.hunt);
       cur.lock += a * ((+P.lock || 0) - cur.lock);
+      cur.follow += a * ((+P.follow || 0) - cur.follow);
       cur.intensity += a * ((+P.intensity || 0) - cur.intensity);
       cur.level += a * ((+P.level !== undefined ? +P.level : -20) - cur.level);
       cur.power += a * ((+P.power || 0.7) - cur.power);
@@ -455,6 +602,7 @@
         updateMemory(hop, short);
         foldAndMask(bands, B, K, Eb, short);
         applyIntensity(bands, B);
+        applyFollow(Eb, bands, B, K, short);
         applyLock(bands, B, K, hop, w, short);
       } else {
         // the warp overlay reads destEdge even in a neutral preset: leave it
@@ -462,6 +610,13 @@
         for (j = 0; j <= B; j++) destEdge[j] = bands.edge[j];
       }
       updateDetector(Eb, bands, B, short);
+      // chord readout runs in both branches: a neutral preset still reports
+      // what it hears, but from energy alone (stale bits would lie)
+      for (k = 0; k < K; k++) {
+        chordMags[k] = Math.sqrt(zRe[0][k] * zRe[0][k] + zIm[0][k] * zIm[0][k] +
+          zRe[1][k] * zRe[1][k] + zIm[1][k] * zIm[1][k]);
+      }
+      updateChord(chordMags, bands, B, short, bypass ? null : (short ? bitsS : bitsL));
 
       // tap: post-modification magnitudes (pre-mirror), for spectrograms
       if (engine.onBins) {
@@ -860,6 +1015,102 @@
       }
     }
 
+    // ---------- Follow: pull the loudest partial to the chord ----------
+    // The codec's held chord supplies target pitch classes; the frame's own
+    // loudest partial is copied ADDITIVELY onto the nearest one (the original
+    // stays — the pedal keeps telling the truth about its input), and two
+    // harmonics of the moved partial are bloomed above it. Copies rescale the
+    // band's bins radially about the sub-bin peak position, so partials that
+    // were harmonic about f0 stay harmonic about f0*r. Placement quantises to
+    // the frame's bin grid (±11.7 Hz on long frames): audible as a slight
+    // pitch steppiness — named character. Phase is inherited from the source
+    // bins, so consecutive frames beat against each other on the moved
+    // partial (Lock-family wobble). Long frames only: the short grid's
+    // 93.75 Hz bins cannot place a semitone below ~1.6 kHz, so following
+    // there would be guesswork — transients skip naturally under adaptive.
+    // No renormalisation: at follow=1 the copy adds up to +5.1 dB on the
+    // dominant band alone (phase-aligned worst case); measured growth on
+    // tonal material is far less (test-follow.js pins the RMS bound).
+    var fSrcRe = [new Float64Array(K_L), new Float64Array(K_L)];
+    var fSrcIm = [new Float64Array(K_L), new Float64Array(K_L)];
+    function applyFollow(Eb, bands, B, K, short) {
+      if (short || cur.follow <= 1e-6) return;
+      if (chord.root < 0 || !chord.quality) return;   // nothing to follow yet
+      var binHz = fs / (2 * K);
+      var k, c;
+      // the frame's loudest bin (post-fold spectrum)
+      var kp = 1, pm = 0;
+      for (k = 1; k < K; k++) {
+        var m = zRe[0][k] * zRe[0][k] + zIm[0][k] * zIm[0][k] +
+                zRe[1][k] * zRe[1][k] + zIm[1][k] * zIm[1][k];
+        if (m > pm) { pm = m; kp = k; }
+      }
+      if (pm <= 0) return;
+      // its band must be coded (the codec starved it -> it is not "the"
+      // content) and dominant (a diffuse floor does not get pulled around)
+      var jb = 0;
+      while (jb < B - 1 && bands.edge[jb + 1] <= kp) jb++;
+      if (bitsL[jb] <= 0) return;
+      var eTot = 0;
+      for (var q = 0; q < B; q++) eTot += Eb[q];
+      if (!(Eb[jb] > 0.25 * eTot)) return;
+      // sub-bin peak position, log-parabolic on the L+R magnitude
+      var mag = function (kk) {
+        return Math.sqrt(zRe[0][kk] * zRe[0][kk] + zIm[0][kk] * zIm[0][kk] +
+                         zRe[1][kk] * zRe[1][kk] + zIm[1][kk] * zIm[1][kk]);
+      };
+      var la = Math.log(mag(kp - 1) + 1e-12), lb = Math.log(mag(kp) + 1e-12),
+        lc = Math.log(mag(kp + 1) + 1e-12);
+      var den = la - 2 * lb + lc;
+      var dp = den !== 0 ? 0.5 * (la - lc) / den : 0;
+      if (dp > 1 || dp < -1) dp = 0;
+      var f0 = (kp + dp) * binHz;
+      // signed interval in [-6, 5] semitones to the nearest held-chord tone
+      var n = followInterval(f0, chord.root, chord.quality);
+      if (n === null) return;
+      var g = 0.8 * cur.follow;
+      var r = Math.pow(2, n / 12);
+      var base = f0 * r;
+      // snapshot the sources: the band's post-fold span plus the bloom
+      // window — writes below can land on not-yet-read bins
+      var lo = bands.edge[jb];
+      if (destEdge[jb] < lo) lo = destEdge[jb];
+      if (lo > kp - 2) lo = kp - 2;
+      if (lo < 1) lo = 1;
+      var hi = bands.edge[jb + 1];
+      if (hi > K) hi = K;
+      for (k = lo; k < hi; k++) for (c = 0; c < 2; c++) {
+        fSrcRe[c][k] = zRe[c][k]; fSrcIm[c][k] = zIm[c][k];
+      }
+      if (n !== 0) {
+        var pkf = (kp + dp) * r;
+        for (k = lo; k < hi; k++) {
+          var d2 = Math.round(pkf + (k - kp) * r);
+          if (d2 < 1) d2 = 1; else if (d2 > K - 1) d2 = K - 1;
+          for (c = 0; c < 2; c++) {
+            zRe[c][d2] += fSrcRe[c][k] * g;
+            zIm[c][d2] += fSrcIm[c][k] * g;
+          }
+        }
+      }
+      // bloom: the 5-bin window about the peak, re-drawn at the moved
+      // partial's 2nd and 3rd harmonics
+      for (var h = 2; h <= 3; h++) {
+        var cen = Math.round(base * h / binHz);
+        var gh = g / h;
+        for (var wi = -2; wi <= 2; wi++) {
+          var ks = kp + wi;
+          if (ks < lo || ks >= hi) continue;
+          var d3 = cen + wi;
+          if (d3 < 1) d3 = 1; else if (d3 > K - 1) d3 = K - 1;
+          for (c = 0; c < 2; c++) {
+            zRe[c][d3] += fSrcRe[c][ks] * gh;
+            zIm[c][d3] += fSrcIm[c][ks] * gh;
+          }
+        }
+      }
+    }
+
     // ---------- Lock: per-band scalar phase loop ----------
     function applyLock(bands, B, K, hop, w, short) {
       // lock 0 = loop off. The tau curve below has its SLOWEST setting at 0,
@@ -978,7 +1229,9 @@
     sineWindow: sineWindow, startWindow: startWindow, stopWindow: stopWindow,
     buildBands: buildBands, bandCount: bandCount,
     BARK_EDGES_HZ: BARK_EDGES_HZ, barkOf: barkOf, ath: ath,
-    foldWeights: foldWeights, mulberry32: mulberry32, isBypass: isBypass
+    foldWeights: foldWeights, mulberry32: mulberry32, isBypass: isBypass,
+    detectChord: detectChord, followInterval: followInterval,
+    CHORD_TEMPLATES: CHORD_TEMPLATES
   };
   if (typeof module !== 'undefined' && module.exports) {
     module.exports = root.RDPipeline;

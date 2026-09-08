@@ -35,6 +35,7 @@ async function loadWorkletSource() {
 
 // ---------- graph ----------
 let ctx = null, effectNode = null, synthNode = null;
+let composer = null;                 // main-thread melody voice (composer.js)
 async function start() {
   if (ctx) return;
   // pin 48000: the engine is benched at 48k budgets, and a 96/192 kHz device
@@ -57,6 +58,7 @@ async function start() {
   });
   synthNode.port.onmessage = onVoices;
   synthNode.connect(effectNode);     // shares the one engine with the loops
+  composer = RDComposer.create({ seed: 0x50a7 });
   sendAllParams();
   status('engine running at ' + ctx.sampleRate + ' Hz — pick a loop or play');
   $('start').disabled = true;
@@ -131,9 +133,15 @@ function onVoices(e) {
     ? voiceCount + ' voice' + (voiceCount > 1 ? 's' : '') : '';
   if (was === 0 && voiceCount > 0) {
     // playing the synth wants lower latency; suggest the short frame once
-    // per activation. The user can put it back — this is a nudge, not a lock.
-    const frame = document.querySelector('[data-param=frame]');
-    if (frame && frame.value === 'long') frame.value = 'short';
+    // per activation. The user can put it back — this is a nudge, not a
+    // lock. Skipped while Melody is on: the composer's own notes trigger
+    // this, and Frame=short starves chord detection, which starves the
+    // melody (measured: the first note flips the frame and the line dies).
+    const melody = document.querySelector('[data-param=melody]');
+    if (!(melody && melody.checked)) {
+      const frame = document.querySelector('[data-param=frame]');
+      if (frame && frame.value === 'long') frame.value = 'short';
+    }
   }
   sendAllParams();
 }
@@ -147,6 +155,11 @@ function sendAllParams() {
     synthNode.port.postMessage({ type: 'waveform', waveform: p.voiceWaveform });
   }
   delete p.voiceWaveform;              // the engine has no such param
+  // melody/density belong to the main-thread composer, not the engine; hunt
+  // is both an engine param and the composer's wildness, so it stays
+  if (composer) composer.setParams({ melody: p.melody, density: p.density, hunt: p.hunt });
+  delete p.melody;
+  delete p.density;
   p.budget = p.budget * RDParams.budgetScale(voiceCount);
   effectNode.port.postMessage({ type: 'params', p });
 }
@@ -316,6 +329,21 @@ function onTaps(e) {
   $('latency').textContent = m.latencyMs.toFixed(0) + ' ms' +
     (m.short ? ' (short)' : '') + ' · ' + m.stats.frames + ' frames, ' +
     m.stats.switches + ' switches';
+  // chord readout: the codec's own read of what is playing (null while the
+  // material is tonally ambiguous — the held chord fades instead of snapping)
+  const NOTE_NAMES = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
+  $('chord').textContent = m.chord
+    ? NOTE_NAMES[m.chord.root] + ' ' + m.chord.quality +
+      ' · ' + m.chord.confidence.toFixed(2) : '';
+
+  // the composer eats the same taps: its clock rides the engine sample
+  // index, so notes land on the codec's frame grid (jitter named in
+  // composer.js)
+  if (composer && synthNode) {
+    const evs = composer.step(m, ctx.sampleRate);
+    for (const ev of evs)
+      synthNode.port.postMessage({ type: 'note', note: ev.note, on: ev.on, vel: ev.vel });
+  }
 }
 
 // ---------- keyboard + on-screen keys ----------
@@ -449,6 +477,8 @@ $('loopsel').addEventListener('change', () => { if (srcNode) playLoop($('loopsel
 $('panic').addEventListener('click', () => {
   if (effectNode) effectNode.port.postMessage({ type: 'reset' });
   if (synthNode) synthNode.port.postMessage({ type: 'alloff' });
+  if (composer) for (const ev of composer.reset())
+    synthNode.port.postMessage({ type: 'note', note: ev.note, on: false });
   for (const k of heldNotes.keys()) {
     const note = heldNotes.get(k);
     if (typeof note === 'number') { noteOff(note); markKey(note, false); }

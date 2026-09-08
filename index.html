@@ -47,6 +47,7 @@ summary { cursor: pointer; color: #8f93a3; }
 .bkey.on { background: #8a5a24; }
 #keyhint { font-size: 11px; color: #6c7080; }
 #voices { color: #e0a44c; font-size: 12px; min-height: 16px; }
+#chord  { color: #9be8c0; font-size: 12px; min-height: 16px; }
 a { color: #8f93a3; }
 </style>
 </head>
@@ -72,6 +73,7 @@ a { color: #8f93a3; }
     (<span id="oct"></span>). Notes feed the same engine as the loops:
     dense chords eat the bit budget.</div>
   <div id="voices"></div>
+  <div id="chord"></div>
   <div id="params-named"></div>
   <details>
     <summary>Advanced</summary>
@@ -90,6 +92,7 @@ a { color: #8f93a3; }
 </div>
 <script src="params.js"></script>
 <script src="loops.js"></script>
-<script type="module" src="app.js?v=4"></script>
+<script src="composer.js"></script>
+<script type="module" src="app.js?v=5"></script>
 </body>
 </html>

@@ -66,6 +66,15 @@
         // slice everything to the frame's own band count: on a short frame
         // bandsE past info.B holds NaN and the edge maps are the short grid's
         var B = info.B;
+        // composer inputs: the held chord, the Memory map's centroid (register
+        // selector) and the starvation count (Budget pressure). Centroid is a
+        // long-grid quantity — consumers guard on `short`.
+        var cSum = 0, wSum = 0, starvedN = 0;
+        var nB = eng.bandCount;
+        for (var j = 0; j < nB; j++) {
+          cSum += eng.map[j] * j; wSum += eng.map[j];
+          if (eng.starved[j]) starvedN++;
+        }
         self.port.postMessage({
           type: 'taps',
           bandsE: new Float32Array(eng.bandsE.subarray(0, B)),
@@ -75,6 +84,12 @@
           W: info.block,
           fs: FS_GUESS,
           short: info.short,
+          start: info.start,
+          chord: eng.chord.root >= 0 && eng.chord.quality
+            ? { root: eng.chord.root, quality: eng.chord.quality,
+                confidence: eng.chord.confidence } : null,
+          centroid: wSum > 0 ? cSum / wSum : nB / 2,
+          starvedN: starvedN,
           stats: { frames: info.stats.frames, longs: info.stats.longs,
             shorts: info.stats.shorts, switches: info.stats.switches },
           latencyMs: (info.block - (info.short ? 256 : 1024)) / FS_GUESS * 1000
