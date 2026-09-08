@@ -408,6 +408,7 @@
       state = 'long'; shortsInGroup = 0; switchLockout = 0;
       transientRun = 0; quietRun = 0; prevTopE = null;
       chord.root = -1; chord.quality = null; chord.confidence = 0;
+      fPhase = {};
       voteRoots.fill(-2); voteQuals.fill(null); votePos = 0; voteFill = 0;
       tiltPhase = [0, 0, 0]; tiltNow = [0, 0, 0];
       tiltS[0].fill(0); tiltS[1].fill(0);
@@ -438,6 +439,7 @@
       cur.power += a * ((+P.power || 0.7) - cur.power);
       cur.mask = P.mask === 'hide' ? 'hide' : 'drop';
       cur.curve = ['bark', 'power', 'linear'].indexOf(P.curve) >= 0 ? P.curve : 'bark';
+      cur.followMode = P.followMode === 'frame' ? 'frame' : 'partial';
       cur.exactEnergy = !!P.exactEnergy;
       // Dry defaults to 0 and Wet to 1 (a crossfade): the engine's bypass is
       // an exact identity, so a parallel dry+wet at 1/1 would double. With
@@ -602,7 +604,7 @@
         updateMemory(hop, short);
         foldAndMask(bands, B, K, Eb, short);
         applyIntensity(bands, B);
-        applyFollow(Eb, bands, B, K, short);
+        applyFollow(Eb, bands, B, K, short, hop);
         applyLock(bands, B, K, hop, w, short);
       } else {
         // the warp overlay reads destEdge even in a neutral preset: leave it
@@ -1015,97 +1017,274 @@
       }
     }
 
-    // ---------- Follow: pull the loudest partial to the chord ----------
-    // The codec's held chord supplies target pitch classes; the frame's own
-    // loudest partial is copied ADDITIVELY onto the nearest one (the original
-    // stays — the pedal keeps telling the truth about its input), and two
-    // harmonics of the moved partial are bloomed above it. Copies rescale the
-    // band's bins radially about the sub-bin peak position, so partials that
-    // were harmonic about f0 stay harmonic about f0*r. Placement quantises to
-    // the frame's bin grid (±11.7 Hz on long frames): audible as a slight
-    // pitch steppiness — named character. Phase is inherited from the source
-    // bins, so consecutive frames beat against each other on the moved
-    // partial (Lock-family wobble). Long frames only: the short grid's
-    // 93.75 Hz bins cannot place a semitone below ~1.6 kHz, so following
-    // there would be guesswork — transients skip naturally under adaptive.
-    // No renormalisation: at follow=1 the copy adds up to +5.1 dB on the
-    // dominant band alone (phase-aligned worst case); measured growth on
-    // tonal material is far less (test-follow.js pins the RMS bound).
+    // ---------- Follow: retune the input into the held chord ----------
+    // Two modes. 'partial': every prominent partial snaps to the nearest
+    // chord tone, harmonic stacks moving together (per-note harmonizer).
+    // 'frame': the dominant partial sets one interval and the whole frame
+    // is transposed by it (chord-quantised pitch shift).
+    //
+    // Replace, not copy: an out-of-chord partial's bins are scaled by (1-g)
+    // and the moved copy written at gain g — at follow=1 a clean move, below
+    // it the original and pulled pitch sound together (chorus-like split,
+    // named character). In-chord content (n=0) is skipped and stays
+    // sample-exact. Moved copies rotate by a per-partial phase accumulator
+    // (the source-to-destination frequency offset times the hop) so the
+    // moved bins advance frame-to-frame like native bins — without it the
+    // overlap-add cancels most of the moved energy (measured 5x loss).
+    //
+    // Named limitations: placement quantises to the frame's bin grid
+    // (±11.7 Hz long); partials within 2 bins merge and move as one (a
+    // semitone below ~500 Hz is under 2 bins at Frame=long and cannot be
+    // resolved); a moved copy colliding with another partial sums against
+    // it (Lock-family wobble); frame mode skips the phase accumulator
+    // (whole-spectrum moves have per-partial phases a scalar cannot fix) —
+    // its transposition smears more than partial mode. The detector reads
+    // the FOLLOWED spectrum, so a strong pull reinforces the held chord.
+    // Long frames only: short-frame bins (93.75 Hz) cannot place a semitone
+    // below ~1.6 kHz — transients skip naturally under adaptive.
     var fSrcRe = [new Float64Array(K_L), new Float64Array(K_L)];
     var fSrcIm = [new Float64Array(K_L), new Float64Array(K_L)];
-    function applyFollow(Eb, bands, B, K, short) {
+    // phase accumulator per moved partial, keyed by rounded MIDI note;
+    // st.f is the frame it last advanced (stale entries reset on return)
+    var fPhase = {};
+    // ---------- Follow: retune the input into the held chord ----------
+    // Two modes. 'partial': every prominent partial snaps to the nearest
+    // chord tone, harmonic stacks moving together (per-note harmonizer).
+    // 'frame': the dominant partial sets one interval and the whole frame
+    // is transposed by it (chord-quantised pitch shift).
+    //
+    // Replace, not copy: an out-of-chord partial's bins are scaled by
+    // (1-g) and the moved copy written at gain g — at follow=1 a clean
+    // move, below it the original and pulled pitch sound together. In-chord
+    // content (n=0) is skipped entirely and stays sample-exact.
+    //
+    // Named limitations: placement quantises to the frame grid (±11.7 Hz
+    // long); partials closer than 5 bins (~117 Hz) merge and move as one;
+    // a moved copy colliding with another partial's bins sums against it
+    // (Lock-family wobble); the retuned input feeds the chord detector, so
+    // a strong pull reinforces the held chord.
+    function applyFollow(Eb, bands, B, K, short, hop) {
       if (short || cur.follow <= 1e-6) return;
       if (chord.root < 0 || !chord.quality) return;   // nothing to follow yet
       var binHz = fs / (2 * K);
       var k, c;
-      // the frame's loudest bin (post-fold spectrum)
-      var kp = 1, pm = 0;
-      for (k = 1; k < K; k++) {
-        var m = zRe[0][k] * zRe[0][k] + zIm[0][k] * zIm[0][k] +
-                zRe[1][k] * zRe[1][k] + zIm[1][k] * zIm[1][k];
-        if (m > pm) { pm = m; kp = k; }
-      }
-      if (pm <= 0) return;
-      // its band must be coded (the codec starved it -> it is not "the"
-      // content) and dominant (a diffuse floor does not get pulled around)
-      var jb = 0;
-      while (jb < B - 1 && bands.edge[jb + 1] <= kp) jb++;
-      if (bitsL[jb] <= 0) return;
-      var eTot = 0;
-      for (var q = 0; q < B; q++) eTot += Eb[q];
-      if (!(Eb[jb] > 0.25 * eTot)) return;
-      // sub-bin peak position, log-parabolic on the L+R magnitude
+
+      // combined L+R magnitude
       var mag = function (kk) {
         return Math.sqrt(zRe[0][kk] * zRe[0][kk] + zIm[0][kk] * zIm[0][kk] +
                          zRe[1][kk] * zRe[1][kk] + zIm[1][kk] * zIm[1][kk]);
       };
-      var la = Math.log(mag(kp - 1) + 1e-12), lb = Math.log(mag(kp) + 1e-12),
-        lc = Math.log(mag(kp + 1) + 1e-12);
-      var den = la - 2 * lb + lc;
-      var dp = den !== 0 ? 0.5 * (la - lc) / den : 0;
-      if (dp > 1 || dp < -1) dp = 0;
-      var f0 = (kp + dp) * binHz;
-      // signed interval in [-6, 5] semitones to the nearest held-chord tone
-      var n = followInterval(f0, chord.root, chord.quality);
-      if (n === null) return;
-      var g = 0.8 * cur.follow;
-      var r = Math.pow(2, n / 12);
-      var base = f0 * r;
-      // snapshot the sources: the band's post-fold span plus the bloom
-      // window — writes below can land on not-yet-read bins
-      var lo = bands.edge[jb];
-      if (destEdge[jb] < lo) lo = destEdge[jb];
-      if (lo > kp - 2) lo = kp - 2;
-      if (lo < 1) lo = 1;
-      var hi = bands.edge[jb + 1];
-      if (hi > K) hi = K;
-      for (k = lo; k < hi; k++) for (c = 0; c < 2; c++) {
-        fSrcRe[c][k] = zRe[c][k]; fSrcIm[c][k] = zIm[c][k];
+
+      // --- peak picking -------------------------------------------------
+      // Prominent partials: local maxima above 0.02 of the frame max
+      // (measured on the arp loop: the 5 saw harmonics sit 6-30 dB above
+      // this floor; noise-floor ripple does not cross it). Peaks within 2
+      // bins of a stronger one are merged — that is main-lobe overlap, not
+      // a neighbour (a radius of 5 absorbed real semitone neighbours in the
+      // mid register: F#5's fundamental at 3.5 bins from a stronger E5 was
+      // eaten and moved with it). Cap 12 strongest.
+      var fmax = 0;
+      for (k = 2; k < K; k++) {
+        var m2 = zRe[0][k] * zRe[0][k] + zIm[0][k] * zIm[0][k] +
+                 zRe[1][k] * zRe[1][k] + zIm[1][k] * zIm[1][k];
+        if (m2 > fmax) fmax = m2;
       }
-      if (n !== 0) {
-        var pkf = (kp + dp) * r;
-        for (k = lo; k < hi; k++) {
-          var d2 = Math.round(pkf + (k - kp) * r);
+      if (fmax <= 0) return;
+      var floor = 0.02 * fmax;
+      var peaks = [];                     // {k, m2}
+      for (k = 2; k < K - 1; k++) {
+        var m = zRe[0][k] * zRe[0][k] + zIm[0][k] * zIm[0][k] +
+                zRe[1][k] * zRe[1][k] + zIm[1][k] * zIm[1][k];
+        if (m <= floor) continue;
+        if (!(m > zRe[0][k-1] * zRe[0][k-1] + zIm[0][k-1] * zIm[0][k-1] +
+                    zRe[1][k-1] * zRe[1][k-1] + zIm[1][k-1] * zIm[1][k-1])) continue;
+        if (!(m >= zRe[0][k+1] * zRe[0][k+1] + zIm[0][k+1] * zIm[0][k+1] +
+                    zRe[1][k+1] * zRe[1][k+1] + zIm[1][k+1] * zIm[1][k+1])) continue;
+        // merge into a stronger peak within 5 bins
+        var merged = false;
+        for (var p = peaks.length - 1; p >= 0 && k - peaks[p].k <= 2; p--) {
+          if (peaks[p].m2 >= m) { merged = true; break; }
+          peaks.splice(p, 1);            // weaker neighbour: absorbed
+        }
+        if (merged) continue;
+        peaks.push({ k: k, m2: m });
+      }
+      if (!peaks.length) return;
+      if (peaks.length > 12) {
+        peaks.sort(function (a, b) { return b.m2 - a.m2; });
+        peaks.length = 12;
+        peaks.sort(function (a, b) { return a.k - b.k; });
+      }
+
+      // sub-bin position per peak (log-parabolic, clamped)
+      var pks = [];
+      for (p = 0; p < peaks.length; p++) {
+        var kp = peaks[p].k;
+        var la = Math.log(mag(kp - 1) + 1e-12), lb = Math.log(mag(kp) + 1e-12),
+          lc = Math.log(mag(kp + 1) + 1e-12);
+        var den = la - 2 * lb + lc;
+        var dp = den !== 0 ? 0.5 * (la - lc) / den : 0;
+        if (dp > 1 || dp < -1) dp = 0;
+        peaks[p].f0 = (kp + dp) * binHz;
+        peaks[p].dp = dp;
+        peaks[p].r = 1;
+        peaks[p].n = 0;
+      }
+
+      // band-coding gate per peak: the codec starved it -> it is not content
+      var bandOf = function (kk) {
+        var j = 0;
+        while (j < B - 1 && bands.edge[j + 1] <= kk) j++;
+        return j;
+      };
+      var kept = [];
+      for (p = 0; p < peaks.length; p++) {
+        if (bitsL[bandOf(peaks[p].k)] <= 0) continue;
+        kept.push(peaks[p]);
+      }
+      if (!kept.length) return;
+
+      var g = cur.follow;
+      var g1 = 1 - g;
+
+      // move-list construction: each moved member is a 5-bin window about
+      // its own peak, radially rescaled about the peak's sub-bin position
+      // so the window's internal shape (skirt, side lobes) moves with it.
+      // Peak picking keeps peaks >= 3 bins apart, so source windows never
+      // overlap; destination writes may collide (additive sum, named wobble)
+      var windows = [];                   // {pk, dp, r, all}
+      if (cur.followMode === 'frame') {
+        // --- frame mode: dominant partial sets the interval --------------
+        var eTot = 0;
+        for (var q = 0; q < B; q++) eTot += Eb[q];
+        var dom = kept[0];
+        for (p = 1; p < kept.length; p++) if (kept[p].m2 > dom.m2) dom = kept[p];
+        var jb = bandOf(dom.k);
+        if (!(Eb[jb] > 0.25 * eTot)) return;
+        var nf = followInterval(dom.f0, chord.root, chord.quality);
+        if (nf === null) return;
+        dom.n = nf;
+        dom.r = Math.pow(2, nf / 12);
+        if (nf !== 0) windows.push({ pk: dom.k, dp: dom.dp, r: dom.r, all: true });
+        // n=0: no move; the bloom below fires from the untouched dominant
+      } else {
+        // --- partial mode: per-note harmonize, stacks coherent -----------
+        // a peak joins the group of a lower peak when it is within 0.6 bin
+        // of an integer multiple (2..10) of it; members inherit the head's
+        // r and move radially about their own pkf, so k*f stays k*(f*r)
+        for (p = 0; p < kept.length; p++) {
+          var pk = kept[p];
+          var ni = null;
+          for (var q2 = 0; q2 < p; q2++) {
+            var head = kept[q2];
+            var ratio = pk.f0 / head.f0;
+            var ki = Math.round(ratio);
+            if (ki >= 2 && ki <= 10 &&
+                Math.abs(ratio - ki) * head.f0 < 0.6 * binHz) {
+              ni = head.n; break;
+            }
+          }
+          if (ni === null)
+            ni = followInterval(pk.f0, chord.root, chord.quality);
+          pk.n = ni === null ? 0 : ni;
+          pk.r = Math.pow(2, pk.n / 12);
+        }
+        for (p = 0; p < kept.length; p++)
+          if (kept[p].n !== 0)
+            windows.push({ pk: kept[p].k, dp: kept[p].dp, r: kept[p].r, all: false });
+      }
+
+      // --- apply the moves: snapshot ALL sources, scale, then write -----
+      // (destination writes can land inside another window)
+      var w2, wi, win;
+      for (w2 = 0; w2 < windows.length; w2++) {
+        win = windows[w2];
+        var lo = win.all ? 1 : win.pk - 2;
+        if (lo < 1) lo = 1;
+        var hi = win.all ? K : win.pk + 3;
+        if (hi > K) hi = K;
+        win.lo = lo; win.hi = hi;
+        for (k = lo; k < hi; k++) for (c = 0; c < 2; c++) {
+          fSrcRe[c][k] = zRe[c][k]; fSrcIm[c][k] = zIm[c][k];
+        }
+      }
+      for (w2 = 0; w2 < windows.length; w2++) {
+        win = windows[w2];
+        for (k = win.lo; k < win.hi; k++) for (c = 0; c < 2; c++) {
+          zRe[c][k] *= g1; zIm[c][k] *= g1;
+        }
+      }
+      for (w2 = 0; w2 < windows.length; w2++) {
+        win = windows[w2];
+        var pkf = (win.pk + win.dp) * win.r;
+        // per-partial phase accumulator: the moved copy represents a partial
+        // that changed frequency from f_src to f_src*r, so its phase advances
+        // by 2*pi*f_src*(1-r) per hop relative to a native bin at the
+        // destination. Rotate each frame's copy by the accumulated angle or
+        // the overlap-add of consecutive frames cancels it (measured: 5x
+        // energy loss without this). Frame-mode whole-spectrum windows skip
+        // it: their bins each have their own phase error, a scalar cannot.
+        var rotRe = 1, rotIm = 0;
+        if (!win.all) {
+          var fSrc = (win.pk + win.dp) * binHz;
+          var key = Math.round(69 + 12 * Math.log2(fSrc / 440));
+          var st = fPhase[key];
+          var fr = stats.frames;
+          if (!st || fr - st.fr > 4) st = fPhase[key] = { p: 0, fr: fr };
+          st.fr = fr;
+          st.p += 2 * Math.PI * fSrc * (1 - win.r) * hop / fs;
+          if (st.p > Math.PI) st.p -= 2 * Math.PI;
+          else if (st.p < -Math.PI) st.p += 2 * Math.PI;
+          rotRe = Math.cos(st.p); rotIm = Math.sin(st.p);
+        }
+        for (k = win.lo; k < win.hi; k++) {
+          var d2 = Math.round(pkf + (k - win.pk) * win.r);
           if (d2 < 1) d2 = 1; else if (d2 > K - 1) d2 = K - 1;
           for (c = 0; c < 2; c++) {
-            zRe[c][d2] += fSrcRe[c][k] * g;
-            zIm[c][d2] += fSrcIm[c][k] * g;
+            var sr = fSrcRe[c][k], si = fSrcIm[c][k];
+            zRe[c][d2] += (sr * rotRe + si * rotIm) * g;
+            zIm[c][d2] += (si * rotRe - sr * rotIm) * g;
           }
         }
       }
-      // bloom: the 5-bin window about the peak, re-drawn at the moved
-      // partial's 2nd and 3rd harmonics
-      for (var h = 2; h <= 3; h++) {
-        var cen = Math.round(base * h / binHz);
-        var gh = g / h;
-        for (var wi = -2; wi <= 2; wi++) {
-          var ks = kp + wi;
-          if (ks < lo || ks >= hi) continue;
-          var d3 = cen + wi;
-          if (d3 < 1) d3 = 1; else if (d3 > K - 1) d3 = K - 1;
-          for (c = 0; c < 2; c++) {
-            zRe[c][d3] += fSrcRe[c][ks] * gh;
-            zIm[c][d3] += fSrcIm[c][ks] * gh;
+
+      // --- bloom: the dominant partial re-drawn at 2f and 3f -------------
+      // Partial mode blooms when the dominant itself moved (a moved stack's
+      // own harmonics are checked against the target first). Frame mode
+      // blooms only at n=0: at n!=0 the whole-spectrum move already carried
+      // every harmonic along, and blooming again would double them.
+      var domPeak = kept[0];
+      for (p = 1; p < kept.length; p++) if (kept[p].m2 > domPeak.m2) domPeak = kept[p];
+      var bloom = domPeak.n !== 0 && cur.followMode === 'partial';
+      var fromLive = false;
+      if (cur.followMode === 'frame') { bloom = domPeak.n === 0; fromLive = true; }
+      if (bloom) {
+        var base = domPeak.f0 * domPeak.r;
+        // occupied map: where every kept peak's energy now lives (moved
+        // peaks at their pulled position, in-chord peaks where they are)
+        var occ = [];
+        for (p = 0; p < kept.length; p++) {
+          occ.push(kept[p].n !== 0
+            ? Math.round(kept[p].f0 * kept[p].r / binHz) : kept[p].k);
+        }
+        for (var h = 2; h <= 3; h++) {
+          var cen = Math.round(base * h / binHz);
+          var stack = false;
+          for (p = 0; p < occ.length; p++) {
+            if (occ[p] >= cen - 3 && occ[p] <= cen + 3) { stack = true; break; }
+          }
+          if (stack) continue;
+          var gh = g / h;
+          for (wi = -2; wi <= 2; wi++) {
+            var ks = domPeak.k + wi;
+            var d3 = cen + wi;
+            if (d3 < 1) d3 = 1; else if (d3 > K - 1) d3 = K - 1;
+            for (c = 0; c < 2; c++) {
+              var sr = fromLive ? zRe[c][ks] : fSrcRe[c][ks];
+              var si = fromLive ? zIm[c][ks] : fSrcIm[c][ks];
+              zRe[c][d3] += sr * gh;
+              zIm[c][d3] += si * gh;
+            }
           }
         }
       }

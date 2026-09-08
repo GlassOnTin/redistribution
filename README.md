@@ -37,11 +37,27 @@ waterfall shows what it currently holds. It is deliberately imprecise: a
 strong out-of-chord tone usually joins the held chord (F#5 over an Am pad
 reads as D7), and dyads flip quality while the root holds.
 
-**Follow** — pulls the frame's loudest partial to the nearest tone of the held
-chord (the original stays; the copy is additive) and blooms two harmonics
-above it. Placement quantises to the frame's frequency grid (±11.7 Hz at
-Frame=long), and a copy landing on a bin that already carries a tone can
-cancel it — a wobble inherited from the Lock family. Long frames only.
+**Follow** — retunes the input into the held chord, in place, in two modes.
+`partial`: every prominent partial snaps to the nearest chord tone, harmonic
+stacks moving together (a note's overtones land at their integer multiples of
+the pulled fundamental). `frame`: the dominant partial sets one interval and
+the whole frame is transposed by it — everything, in-chord content included.
+Replace semantics: a moved partial's bins are scaled by (1−Follow) and the
+pulled copy written at gain Follow — at 1 a clean move, below it the original
+and pulled pitch sound together like a chorus split. Partials already in the
+chord are untouched. Moved copies ride a per-partial phase accumulator so
+the overlap-add doesn't cancel them frame to frame. Named limits: placement
+quantises to the frame's bin grid (±11.7 Hz at Frame=long), and a moved
+partial arrives several dB quieter than it left, depending on where its
+sub-bin position rounds; partials within 2 bins merge and move as one (a
+semitone below ~500 Hz is unresolvable at Frame=long); a copy colliding with
+another partial sums against it (Lock-family wobble); frame mode skips the
+phase accumulator and smears more. The detector reads the followed spectrum,
+so a fired pull reinforces the held chord — and a strong out-of-chord stack
+usually adopts its own chord (n=0, untouched), so the pull shows at chord
+transitions and note onsets, where the vote still holds the old chord. The
+codec's own masking is upstream of all of it: a quiet out-of-chord tone is
+dropped by the codec before Follow ever sees it. Long frames only.
 
 **Melody** — a mono synth voice that sings the held chord. Its register
 follows the Memory map's centroid, Hunt flattens its wander from stepwise
